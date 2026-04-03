@@ -5,6 +5,8 @@
 
 > Near-deterministic IaC automation — takes a Terraform task and delivers a validated GitHub PR, fully autonomous, end-to-end, in under 10 minutes.
 
+The server is the core of the system. The client can be a web app, a CLI, or a binary like a VS Code plugin — we chose a web client because it's easier to distribute and manage.
+
 ---
 
 ## Table of contents
