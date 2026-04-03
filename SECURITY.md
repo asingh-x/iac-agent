@@ -4,7 +4,7 @@
 
 Please do **not** open a public GitHub issue for security vulnerabilities.
 
-Instead, [create a GitHub Security Advisory](https://github.com/tf-agent/tf-agent/security/advisories/new) with:
+Instead, [create a GitHub Security Advisory](https://github.com/asingh-x/tf-agent/security/advisories/new) with:
 - A description of the vulnerability
 - Steps to reproduce
 - Potential impact
@@ -36,7 +36,7 @@ Per-user GitHub and Atlassian tokens are encrypted at rest using AES-256-GCM bef
 
 ### Tool permissions
 
-The agent runs with a configurable permissions policy (`config.yaml → permissions.default`):
+The agent runs with a configurable permissions policy (`config.toml → permissions.default`):
 
 | Policy | Behaviour |
 |---|---|
@@ -57,5 +57,5 @@ Sub-agents spawned by the `Agent` tool receive a restricted tool subset based on
 
 ## Known limitations
 
-- The SQLite database file is not encrypted at rest beyond the column-level AES-256-GCM for token fields — protect the file with filesystem permissions
+- The PostgreSQL database is not encrypted at rest beyond the column-level AES-256-GCM for token fields — protect the database with filesystem permissions and network access controls
 - Bash tool execution is sandboxed only by OS-level user permissions; run the server as a least-privilege user
