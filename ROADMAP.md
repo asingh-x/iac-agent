@@ -36,6 +36,8 @@ Items are ordered by priority within each category. See [REVIEW.md](REVIEW.md) f
 | Priority | Task | Detail |
 |---|---|---|
 | **P1** | Validate auto-fix loop | Parse `terraform validate -json` output, feed errors back into the agent loop for one retry before failing — currently the skill reports errors but does not attempt repair |
+| **P2** | Post-merge rework | Listen for GitHub review comments via webhooks, feed them back as a new task, agent pushes a fixup commit to the same branch |
+| **P2** | Merge conflict resolution | Detect conflicts on open PRs via webhook, trigger agent to rebase branch against main and force push |
 
 ---
 
