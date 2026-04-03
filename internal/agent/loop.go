@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -363,6 +364,12 @@ func (a *Agent) executeSingleTool(ctx context.Context, call llm.ToolUseEvent, ch
 
 	// Post-hooks.
 	a.hooks.RunPost(ctx, call.Name, call.Input)
+
+	// If the tool itself returned a context cancellation, propagate it as
+	// a clean cancellation rather than a regular tool error.
+	if errors.Is(execErr, context.Canceled) {
+		return nil
+	}
 
 	if execErr != nil {
 		output = fmt.Sprintf("Error: %s", execErr.Error())

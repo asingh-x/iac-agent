@@ -31,7 +31,6 @@ export function SettingsPage({ userInfo, onUserUpdate }: Props) {
 
   return (
     <div>
-      {/* Page header */}
       <div style={{ marginBottom: 28 }}>
         <div style={{ fontSize: 22, fontWeight: 700, color: "var(--text)", letterSpacing: "-.02em" }}>
           Settings
@@ -42,9 +41,9 @@ export function SettingsPage({ userInfo, onUserUpdate }: Props) {
 
         {/* Left nav */}
         <div style={{ width: 180, flexShrink: 0 }}>
-          <SectionNav label="Profile" active={section === "profile"} onClick={() => navSection("profile")} />
-          <SectionNav label="GitHub Key" active={section === "github"} onClick={() => navSection("github")} configured={settings?.github_token_set} />
-          <SectionNav label="Jira Key" active={section === "jira"} onClick={() => navSection("jira")} configured={settings?.atlassian_token_set} />
+          <SectionNav label="Profile"    active={section === "profile"} onClick={() => navSection("profile")} />
+          <SectionNav label="GitHub Key" active={section === "github"}  onClick={() => navSection("github")} />
+          <SectionNav label="Jira Key"   active={section === "jira"}    onClick={() => navSection("jira")} />
           {userInfo?.role === "admin" && (
             <>
               <div style={{ height: 1, background: "var(--border)", margin: "10px 0" }} />
@@ -78,63 +77,49 @@ export function SettingsPage({ userInfo, onUserUpdate }: Props) {
 }
 
 // ── Left nav item ──────────────────────────────────────────────────────────────
-
-function SectionNav({ label, active, onClick, configured }: {
+function SectionNav({ label, active, onClick }: {
   label: string;
   active: boolean;
   onClick: () => void;
-  configured?: boolean;
 }) {
   return (
     <button
       onClick={onClick}
-      style={{
-        display: "flex", alignItems: "center", justifyContent: "space-between",
-        width: "100%", padding: "8px 12px", borderRadius: 7, marginBottom: 2,
-        background: active ? "var(--surface-2, #f5f4f0)" : "transparent",
-        border: "none", cursor: "pointer", textAlign: "left",
-        fontSize: "var(--text-sm)", fontWeight: active ? 600 : 400,
-        color: active ? "var(--text)" : "var(--text-2)",
-        transition: "background .12s, color .12s",
-      }}
-      onMouseEnter={e => { if (!active) e.currentTarget.style.background = "var(--surface-2, #f5f4f0)"; }}
-      onMouseLeave={e => { if (!active) e.currentTarget.style.background = "transparent"; }}
+      className={`settings-nav-item${active ? " active" : ""}`}
     >
       {label}
-      {configured === false && (
-        <span style={{
-          width: 7, height: 7, borderRadius: "50%", flexShrink: 0,
-          background: "#d0d0d0",
-        }} />
-      )}
     </button>
   );
 }
 
 // ── Profile section ────────────────────────────────────────────────────────────
-
 function ProfileSection({ userInfo, onUserUpdate }: { userInfo: UserInfo | null; onUserUpdate: (info: UserInfo) => void }) {
   const [username, setUsername] = useState(userInfo?.username ?? "");
   const [saving, setSaving] = useState(false);
-  const [feedback, setFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  // Sync input when userInfo loads or changes (e.g. first load, after save)
   useEffect(() => {
     if (userInfo?.username) setUsername(userInfo.username);
   }, [userInfo?.username]);
+
+  const handleChange = (v: string) => {
+    setUsername(v);
+    setSaved(false);
+    setError(null);
+  };
 
   const handleSave = async () => {
     const trimmed = username.trim();
     if (!trimmed || trimmed === userInfo?.username) return;
     setSaving(true);
-    setFeedback(null);
+    setError(null);
     try {
       const updated = await updateMe(trimmed);
       onUserUpdate(updated);
-      setFeedback({ ok: true, msg: "Display name updated." });
-      setTimeout(() => setFeedback(null), 3000);
+      setSaved(true);
     } catch (e) {
-      setFeedback({ ok: false, msg: e instanceof Error ? e.message : "Failed to update." });
+      setError(e instanceof Error ? e.message : "Failed to update.");
     } finally {
       setSaving(false);
     }
@@ -174,7 +159,7 @@ function ProfileSection({ userInfo, onUserUpdate }: { userInfo: UserInfo | null;
             className="form-input"
             placeholder="Your name"
             value={username}
-            onChange={(e) => setUsername(e.target.value)}
+            onChange={(e) => handleChange(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
             autoComplete="off"
           />
@@ -189,11 +174,8 @@ function ProfileSection({ userInfo, onUserUpdate }: { userInfo: UserInfo | null;
           >
             {saving ? "Saving…" : "Save"}
           </button>
-          {feedback && (
-            <span style={{ fontSize: "var(--text-sm)", color: feedback.ok ? "var(--green)" : "var(--red)" }}>
-              {feedback.msg}
-            </span>
-          )}
+          {saved && <SavedBadge />}
+          {error && <span style={{ fontSize: "var(--text-sm)", color: "var(--red)" }}>{error}</span>}
         </div>
       </div>
     </div>
@@ -201,24 +183,31 @@ function ProfileSection({ userInfo, onUserUpdate }: { userInfo: UserInfo | null;
 }
 
 // ── GitHub section ─────────────────────────────────────────────────────────────
-
 function GitHubSection({ isSet, onSaved }: { isSet: boolean; onSaved: () => void }) {
   const [token, setToken] = useState("");
+  const [showToken, setShowToken] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [feedback, setFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleChange = (v: string) => {
+    setToken(v);
+    setSaved(false);
+    setError(null);
+  };
 
   const handleSave = async () => {
     if (!token.trim()) return;
     setSaving(true);
-    setFeedback(null);
+    setError(null);
     try {
       await saveSettings({ github_token: token.trim() });
       setToken("");
+      setShowToken(false);
       onSaved();
-      setFeedback({ ok: true, msg: "GitHub key saved." });
-      setTimeout(() => setFeedback(null), 3000);
+      setSaved(true);
     } catch (e) {
-      setFeedback({ ok: false, msg: e instanceof Error ? e.message : "Failed to save." });
+      setError(e instanceof Error ? e.message : "Failed to save.");
     } finally {
       setSaving(false);
     }
@@ -232,38 +221,47 @@ function GitHubSection({ isSet, onSaved }: { isSet: boolean; onSaved: () => void
       />
 
       <div className="card" style={{ marginTop: 20 }}>
-        <div style={{ marginBottom: 16, fontSize: "var(--text-sm)", color: isSet ? "#2d6a4f" : "var(--text-3)" }}>
-          {isSet ? "Token configured — enter a new value below to replace it." : "No token set."}
-        </div>
+        {isSet && (
+          <div className="token-status-banner configured">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+            Token configured — enter a new value below to replace it.
+          </div>
+        )}
+
         <div className="form-row" style={{ marginBottom: 16 }}>
           <label className="form-label">Personal Access Token</label>
-          <input
-            type="password"
-            className="form-input"
-            placeholder="ghp_…"
-            value={token}
-            onChange={(e) => setToken(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
-            autoComplete="off"
-          />
+          <div className="token-input-wrap">
+            <input
+              type={showToken ? "text" : "password"}
+              className="form-input"
+              placeholder="ghp_…"
+              value={token}
+              onChange={(e) => handleChange(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+              autoComplete="off"
+            />
+            <button
+              type="button"
+              className="token-visibility-btn"
+              onClick={() => setShowToken((v) => !v)}
+              title={showToken ? "Hide token" : "Show token"}
+            >
+              {showToken ? <EyeOffIcon /> : <EyeIcon />}
+            </button>
+          </div>
           <span className="form-hint">
             Generate one at <strong>github.com → Settings → Developer settings → Personal access tokens</strong>
           </span>
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <button
-            className="btn btn-primary"
-            onClick={handleSave}
-            disabled={saving || !token.trim()}
-          >
+          <button className="btn btn-primary" onClick={handleSave} disabled={saving || !token.trim()}>
             {saving ? "Saving…" : "Save"}
           </button>
-          {feedback && (
-            <span style={{ fontSize: "var(--text-sm)", color: feedback.ok ? "var(--green)" : "var(--red)" }}>
-              {feedback.msg}
-            </span>
-          )}
+          {saved && <SavedBadge />}
+          {error && <span style={{ fontSize: "var(--text-sm)", color: "var(--red)" }}>{error}</span>}
         </div>
       </div>
     </div>
@@ -271,7 +269,6 @@ function GitHubSection({ isSet, onSaved }: { isSet: boolean; onSaved: () => void
 }
 
 // ── Jira section ───────────────────────────────────────────────────────────────
-
 function JiraSection({ isSet, domain: savedDomain, email: savedEmail, onSaved }: {
   isSet: boolean;
   domain: string;
@@ -279,30 +276,33 @@ function JiraSection({ isSet, domain: savedDomain, email: savedEmail, onSaved }:
   onSaved: () => void;
 }) {
   const [token, setToken] = useState("");
+  const [showToken, setShowToken] = useState(false);
   const [domain, setDomain] = useState(savedDomain);
   const [email, setEmail] = useState(savedEmail);
   const [saving, setSaving] = useState(false);
-  const [feedback, setFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  // Sync if parent reloads saved values
   useEffect(() => { setDomain(savedDomain); }, [savedDomain]);
   useEffect(() => { setEmail(savedEmail); }, [savedEmail]);
 
+  const markDirty = () => { setSaved(false); setError(null); };
+
   const handleSave = async () => {
     setSaving(true);
-    setFeedback(null);
+    setError(null);
     try {
       await saveSettings({
-        atlassian_token: token.trim() || undefined,
+        atlassian_token:  token.trim() || undefined,
         atlassian_domain: domain.trim() || undefined,
-        atlassian_email: email.trim() || undefined,
+        atlassian_email:  email.trim() || undefined,
       });
       setToken("");
+      setShowToken(false);
       onSaved();
-      setFeedback({ ok: true, msg: "Jira settings saved." });
-      setTimeout(() => setFeedback(null), 3000);
+      setSaved(true);
     } catch (e) {
-      setFeedback({ ok: false, msg: e instanceof Error ? e.message : "Failed to save." });
+      setError(e instanceof Error ? e.message : "Failed to save.");
     } finally {
       setSaving(false);
     }
@@ -316,19 +316,35 @@ function JiraSection({ isSet, domain: savedDomain, email: savedEmail, onSaved }:
       />
 
       <div className="card" style={{ marginTop: 20 }}>
-        <div style={{ marginBottom: 16, fontSize: "var(--text-sm)", color: isSet ? "#2d6a4f" : "var(--text-3)" }}>
-          {isSet ? "Token configured — enter a new value below to replace it." : "No token set."}
-        </div>
+        {isSet && (
+          <div className="token-status-banner configured">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+            Token configured — enter a new value below to replace it.
+          </div>
+        )}
+
         <div className="form-row" style={{ marginBottom: 16 }}>
           <label className="form-label">Atlassian API Token</label>
-          <input
-            type="password"
-            className="form-input"
-            placeholder="ATATT3x…"
-            value={token}
-            onChange={(e) => setToken(e.target.value)}
-            autoComplete="off"
-          />
+          <div className="token-input-wrap">
+            <input
+              type={showToken ? "text" : "password"}
+              className="form-input"
+              placeholder="ATATT3x…"
+              value={token}
+              onChange={(e) => { setToken(e.target.value); markDirty(); }}
+              autoComplete="off"
+            />
+            <button
+              type="button"
+              className="token-visibility-btn"
+              onClick={() => setShowToken((v) => !v)}
+              title={showToken ? "Hide token" : "Show token"}
+            >
+              {showToken ? <EyeOffIcon /> : <EyeIcon />}
+            </button>
+          </div>
           <span className="form-hint">
             Generate one at <strong>id.atlassian.com → Security → API tokens</strong>
           </span>
@@ -342,7 +358,7 @@ function JiraSection({ isSet, domain: savedDomain, email: savedEmail, onSaved }:
               className="form-input"
               placeholder="mycompany.atlassian.net"
               value={domain}
-              onChange={(e) => setDomain(e.target.value)}
+              onChange={(e) => { setDomain(e.target.value); markDirty(); }}
             />
           </div>
           <div className="form-row" style={{ flex: 1, marginBottom: 0 }}>
@@ -352,24 +368,17 @@ function JiraSection({ isSet, domain: savedDomain, email: savedEmail, onSaved }:
               className="form-input"
               placeholder="you@company.com"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) => { setEmail(e.target.value); markDirty(); }}
             />
           </div>
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <button
-            className="btn btn-primary"
-            onClick={handleSave}
-            disabled={saving}
-          >
+          <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
             {saving ? "Saving…" : "Save"}
           </button>
-          {feedback && (
-            <span style={{ fontSize: "var(--text-sm)", color: feedback.ok ? "var(--green)" : "var(--red)" }}>
-              {feedback.msg}
-            </span>
-          )}
+          {saved && <SavedBadge />}
+          {error && <span style={{ fontSize: "var(--text-sm)", color: "var(--red)" }}>{error}</span>}
         </div>
       </div>
     </div>
@@ -377,7 +386,6 @@ function JiraSection({ isSet, domain: savedDomain, email: savedEmail, onSaved }:
 }
 
 // ── Shared section header ──────────────────────────────────────────────────────
-
 function SectionHeader({ title, description }: { title: string; description: string }) {
   return (
     <div>
@@ -388,5 +396,36 @@ function SectionHeader({ title, description }: { title: string; description: str
         {description}
       </p>
     </div>
+  );
+}
+
+// ── Persistent save badge (stays until user edits again) ───────────────────────
+function SavedBadge() {
+  return (
+    <span className="saved-badge">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="20 6 9 17 4 12" />
+      </svg>
+      Saved
+    </span>
+  );
+}
+
+// ── Eye icons ─────────────────────────────────────────────────────────────────
+function EyeIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+function EyeOffIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+      <line x1="1" y1="1" x2="23" y2="23" />
+    </svg>
   );
 }

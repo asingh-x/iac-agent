@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -310,16 +311,26 @@ func (r *Runner) run(ctx context.Context, item queue.Item) {
 	metricLLMInputTokens.Add(float64(totalIn))
 	metricLLMOutputTokens.Add(float64(totalOut))
 
+	// If the event loop exited without a taskErr but the context was cancelled,
+	// treat it as cancellation (happens when executeSingleTool returns nil early).
+	if taskErr == nil && errors.Is(ctx.Err(), context.Canceled) {
+		taskErr = context.Canceled
+	}
+
+	// Use a fresh context for all post-task DB writes and hub events — the task
+	// context (ctx) may already be cancelled, which would silently drop these calls.
+	saveCtx := context.Background()
+
 	if taskErr != nil {
-		if taskErr == context.Canceled {
+		if errors.Is(taskErr, context.Canceled) {
 			metricTasksCompleted.WithLabelValues("cancelled").Inc()
-			if err := r.store.UpdateTaskResult(ctx, item.TaskID, "cancelled", "", "Task cancelled by user", outputBuf.String(), totalIn, totalOut); err != nil {
+			if err := r.store.UpdateTaskResult(saveCtx, item.TaskID, "cancelled", "", "Task cancelled by user", outputBuf.String(), totalIn, totalOut); err != nil {
 				r.logger.Error("failed to update task result", "task_id", item.TaskID, "status", "cancelled", "err", err)
 			}
 			r.hub.Publish(item.TaskID, ServerEvent{Type: "error", Error: "Task cancelled by user"})
 		} else {
 			metricTasksCompleted.WithLabelValues("failed").Inc()
-			if err := r.store.UpdateTaskResult(ctx, item.TaskID, "failed", "", taskErr.Error(), outputBuf.String(), totalIn, totalOut); err != nil {
+			if err := r.store.UpdateTaskResult(saveCtx, item.TaskID, "failed", "", taskErr.Error(), outputBuf.String(), totalIn, totalOut); err != nil {
 				r.logger.Error("failed to update task result", "task_id", item.TaskID, "status", "failed", "err", err)
 			}
 			r.hub.Publish(item.TaskID, ServerEvent{Type: "error", Error: taskErr.Error()})
@@ -329,16 +340,16 @@ func (r *Runner) run(ctx context.Context, item queue.Item) {
 	}
 
 	metricTasksCompleted.WithLabelValues("done").Inc()
-	if err := r.store.UpdateTaskResult(ctx, item.TaskID, "done", prURL, "", outputBuf.String(), totalIn, totalOut); err != nil {
+	if err := r.store.UpdateTaskResult(saveCtx, item.TaskID, "done", prURL, "", outputBuf.String(), totalIn, totalOut); err != nil {
 		r.logger.Error("failed to update task result", "task_id", item.TaskID, "status", "done", "err", err)
 	}
 	r.hub.Publish(item.TaskID, ServerEvent{Type: "done", PRUrl: prURL})
 	r.hub.Close(item.TaskID)
 }
 
-func (r *Runner) fail(ctx context.Context, taskID, msg string) {
+func (r *Runner) fail(_ context.Context, taskID, msg string) {
 	metricTasksCompleted.WithLabelValues("failed").Inc()
-	if err := r.store.UpdateTaskResult(ctx, taskID, "failed", "", msg, "", 0, 0); err != nil {
+	if err := r.store.UpdateTaskResult(context.Background(), taskID, "failed", "", msg, "", 0, 0); err != nil {
 		r.logger.Error("failed to persist task failure", "task_id", taskID, "err", err)
 	}
 	r.hub.Publish(taskID, ServerEvent{Type: "error", Error: msg})

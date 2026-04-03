@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { answerTask, getTask } from "../lib/api";
+import { answerTask, cancelTask, getTask } from "../lib/api";
 import type { TaskDetail as TTaskDetail } from "../types";
 
 interface Props {
@@ -12,6 +12,7 @@ export function TaskDetail({ taskId, onBack }: Props) {
   const [error, setError] = useState("");
   const [answer, setAnswer] = useState("");
   const [sending, setSending] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const answerRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -49,7 +50,7 @@ export function TaskDetail({ taskId, onBack }: Props) {
   };
 
   const cleanInput = task.input_text.replace(/^\[.*?\]\s*/g, "");
-  const duration = task.started_at && task.completed_at
+  const durationSec = task.started_at && task.completed_at
     ? Math.round((new Date(task.completed_at).getTime() - new Date(task.started_at).getTime()) / 1000)
     : null;
 
@@ -69,9 +70,32 @@ export function TaskDetail({ taskId, onBack }: Props) {
           <span style={{ fontSize: "var(--text-xs)", fontWeight: 600, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--text-3)" }}>
             Task
           </span>
-          <span className={`chip chip-${task.status === "done" ? "done" : task.status === "failed" ? "failed" : task.status === "running" ? "running" : "queued"}`}>
+          <span className={`status-badge ${task.status}`}>
             {task.status}
           </span>
+          {(task.status === "waiting_for_input" || task.status === "running" || task.status === "queued") && (
+            <button
+              className="btn btn-sm"
+              style={{ color: "var(--red)", borderColor: "#f5c6c2" }}
+              disabled={cancelling}
+              onClick={async () => {
+                setCancelling(true);
+                await cancelTask(taskId).catch(() => {});
+                // Poll until status reflects the cancellation (server update is async).
+                for (let i = 0; i < 5; i++) {
+                  await new Promise((r) => setTimeout(r, 700));
+                  const updated = await getTask(taskId).catch(() => null);
+                  if (updated) {
+                    setTask(updated);
+                    if (updated.status !== "running" && updated.status !== "waiting_for_input" && updated.status !== "queued") break;
+                  }
+                }
+                setCancelling(false);
+              }}
+            >
+              {cancelling ? "Cancelling…" : "⏹ Cancel"}
+            </button>
+          )}
         </div>
         <span style={{ fontSize: "var(--text-xs)", color: "var(--text-3)", fontFamily: "var(--font-mono)" }}>
           {task.id}
@@ -92,7 +116,7 @@ export function TaskDetail({ taskId, onBack }: Props) {
       <div className="card" style={{ padding: "16px 22px" }}>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
           <MetaField label="Created" value={new Date(task.created_at).toLocaleString()} />
-          {duration !== null && <MetaField label="Duration" value={`${duration}s`} />}
+          {durationSec !== null && <MetaField label="Duration" value={humanizeDuration(durationSec)} />}
           {(task.input_tokens > 0 || task.output_tokens > 0) && (
             <MetaField
               label="Tokens"
@@ -103,8 +127,15 @@ export function TaskDetail({ taskId, onBack }: Props) {
         </div>
       </div>
 
+      {/* Cancelled notice */}
+      {task.status === "cancelled" && (
+        <div style={{ fontSize: "var(--text-sm)", color: "var(--amber)", background: "var(--amber-bg)", border: "1px solid #fde68a", borderRadius: "var(--radius-sm)", padding: "10px 14px" }}>
+          Task was cancelled by user.
+        </div>
+      )}
+
       {/* Error */}
-      {task.error_msg && (
+      {task.error_msg && task.status !== "cancelled" && (
         <div className="error-box">
           <strong>Error:</strong> {task.error_msg}
         </div>
@@ -115,7 +146,7 @@ export function TaskDetail({ taskId, onBack }: Props) {
         <div className="card" style={{ borderColor: "var(--border)", animation: "slideUp .2s ease" }}>
           <div style={{ marginBottom: 16 }}>
             <div style={{ fontSize: "var(--text-sm)", fontWeight: 600, color: "var(--text)", marginBottom: 4 }}>
-              <span style={{ color: "#f97316", marginRight: 6 }}>?</span>Agent needs clarification
+              <span style={{ color: "var(--accent)", marginRight: 6 }}>?</span>Agent needs clarification
             </div>
             <div style={{ fontSize: "var(--text-sm)", color: "var(--text-2)", whiteSpace: "pre-wrap", lineHeight: 1.6 }}>
               {task.pending_question}
@@ -186,6 +217,13 @@ export function TaskDetail({ taskId, onBack }: Props) {
 
     </div>
   );
+}
+
+function humanizeDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return s > 0 ? `${m}m ${s}s` : `${m}m`;
 }
 
 function MetaField({ label, value }: { label: string; value: string }) {

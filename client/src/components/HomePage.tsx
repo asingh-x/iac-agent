@@ -16,9 +16,9 @@ const FEATURES = [
   { icon: "⎇", label: "Auto PR" },
 ];
 
-const INTEGRATIONS: { key: keyof Pick<UserSettings, "github_token_set" | "atlassian_token_set">; label: string }[] = [
-  { key: "github_token_set", label: "GitHub" },
-  { key: "atlassian_token_set", label: "Jira" },
+const INTEGRATIONS: { key: keyof Pick<UserSettings, "github_token_set" | "atlassian_token_set">; label: string; section: string }[] = [
+  { key: "github_token_set",    label: "GitHub", section: "github" },
+  { key: "atlassian_token_set", label: "Jira",   section: "jira"   },
 ];
 
 export function HomePage({ onSubmit, loading, onNavigate }: Props) {
@@ -61,26 +61,26 @@ export function HomePage({ onSubmit, loading, onNavigate }: Props) {
               {f.label}
             </span>
           ))}
-          {settings && INTEGRATIONS.map(({ key, label }) => {
+          {settings && INTEGRATIONS.map(({ key, label, section }) => {
             const configured = settings[key];
             return (
               <span
                 key={label}
                 title={configured ? `${label} token configured` : `${label} token not set — click to configure`}
-                onClick={!configured && onNavigate ? () => onNavigate("settings") : undefined}
+                onClick={onNavigate ? () => { sessionStorage.setItem("tf_settings_section", section); onNavigate("settings"); } : undefined}
                 style={{
                   display: "inline-flex", alignItems: "center", gap: 5,
                   fontSize: "var(--text-xs)", fontWeight: 500,
-                  color: configured ? "#2d6a4f" : "var(--text-3)",
-                  background: configured ? "#d8f3dc" : "var(--surface)",
-                  border: `1px solid ${configured ? "#95d5b2" : "var(--border)"}`,
+                  color: configured ? "var(--green)" : "var(--text-3)",
+                  background: configured ? "var(--green-bg)" : "var(--surface)",
+                  border: `1px solid ${configured ? "#a7d9bc" : "var(--border)"}`,
                   borderRadius: 20, padding: "4px 10px",
                   boxShadow: "0 1px 2px rgba(0,0,0,.04)",
-                  cursor: !configured && onNavigate ? "pointer" : "default",
+                  cursor: onNavigate ? "pointer" : "default",
                 }}>
                 <span style={{
                   width: 6, height: 6, borderRadius: "50%",
-                  background: configured ? "#52b788" : "#ccc",
+                  background: configured ? "var(--green)" : "var(--border-strong)",
                   flexShrink: 0,
                 }} />
                 {label}

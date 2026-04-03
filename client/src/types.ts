@@ -60,7 +60,7 @@ export interface OutputLine {
 
 export interface HistoryTask {
   id: string;
-  status: "queued" | "running" | "done" | "failed" | "waiting_for_input";
+  status: "queued" | "running" | "done" | "failed" | "waiting_for_input" | "cancelled";
   input_text: string;
   created_at: string;
   pr_url?: string;

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { listTasks } from "../lib/api";
+import { cancelTask, listTasks } from "../lib/api";
 import type { TaskDetail } from "../types";
 
 interface Props {
@@ -15,6 +15,7 @@ export function HistoryPage({ onSelectTask, refreshTrigger }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
 
   useEffect(() => {
     setLoading(true);
@@ -62,10 +63,9 @@ export function HistoryPage({ onSelectTask, refreshTrigger }: Props) {
           </div>
         ) : (
           <>
-            {/* Table */}
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead>
-                <tr style={{ background: "#ffffff", borderBottom: "1px solid var(--border)" }}>
+                <tr style={{ background: "var(--surface)", borderBottom: "1px solid var(--border)" }}>
                   <Th style={{ width: 28 }} />
                   <Th>Status</Th>
                   <Th>Task</Th>
@@ -78,23 +78,25 @@ export function HistoryPage({ onSelectTask, refreshTrigger }: Props) {
               <tbody>
                 {paginated.map((task) => {
                   const isExpanded = expanded.has(task.id);
-                  const label = task.input_text.replace(/^\[.*?\]\s*/g, "");
-                  const duration = durationSec(task.started_at, task.completed_at);
-                  const tokens = (task.input_tokens ?? 0) + (task.output_tokens ?? 0);
+                  const isHovered  = hoveredId === task.id;
+                  const label      = task.input_text.replace(/^\[.*?\]\s*/g, "");
+                  const duration   = durationSec(task.started_at, task.completed_at);
+                  const tokens     = (task.input_tokens ?? 0) + (task.output_tokens ?? 0);
+                  const isJira     = /^\[JIRA:/i.test(task.input_text);
 
                   return (
                     <>
                       <tr
                         key={task.id}
                         onClick={() => toggleExpand(task.id)}
+                        onMouseEnter={() => setHoveredId(task.id)}
+                        onMouseLeave={() => setHoveredId(null)}
                         style={{
                           borderBottom: isExpanded ? "none" : "1px solid var(--border)",
                           cursor: "pointer",
-                          background: isExpanded ? "#ffffff" : "#ffffff",
+                          background: isHovered && !isExpanded ? "var(--surface-2)" : "var(--surface)",
                           transition: "background .1s",
                         }}
-                        onMouseEnter={e => { if (!isExpanded) (e.currentTarget as HTMLElement).style.background = "#ffffff"; }}
-                        onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = isExpanded ? "#ffffff" : "#ffffff"; }}
                       >
                         <Td>
                           <svg
@@ -109,12 +111,15 @@ export function HistoryPage({ onSelectTask, refreshTrigger }: Props) {
                           <span className={`status-badge ${task.status}`}>{task.status}</span>
                         </Td>
                         <Td>
-                          <span style={{ fontSize: "var(--text-sm)", color: "var(--text)", fontWeight: 500 }}>
-                            {label.slice(0, 64)}{label.length > 64 ? "…" : ""}
-                          </span>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                            {isJira && <span className="input-type-badge jira">Jira</span>}
+                            <span style={{ fontSize: "var(--text-sm)", color: "var(--text)", fontWeight: 500 }}>
+                              {label.slice(0, 64)}{label.length > 64 ? "…" : ""}
+                            </span>
+                          </div>
                         </Td>
                         <Td muted>{fmt(task.created_at)}</Td>
-                        <Td muted>{duration !== null ? `${duration}s` : "—"}</Td>
+                        <Td muted>{duration !== null ? humanizeDuration(duration) : "—"}</Td>
                         <Td muted>{tokens > 0 ? tokens.toLocaleString() : "—"}</Td>
                         <Td>
                           {task.pr_url ? (
@@ -122,10 +127,13 @@ export function HistoryPage({ onSelectTask, refreshTrigger }: Props) {
                               href={task.pr_url}
                               target="_blank"
                               rel="noopener noreferrer"
-                              onClick={e => e.stopPropagation()}
-                              style={{ fontSize: "var(--text-xs)", color: "var(--green)", fontWeight: 500, textDecoration: "underline", textUnderlineOffset: 2 }}
+                              onClick={(e) => e.stopPropagation()}
+                              className="pr-chip"
                             >
-                              View ↗
+                              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                <circle cx="18" cy="18" r="3" /><circle cx="6" cy="6" r="3" /><path d="M13 6h3a2 2 0 0 1 2 2v7" /><line x1="6" y1="9" x2="6" y2="21" />
+                              </svg>
+                              PR
                             </a>
                           ) : "—"}
                         </Td>
@@ -135,8 +143,8 @@ export function HistoryPage({ onSelectTask, refreshTrigger }: Props) {
                       {isExpanded && (
                         <tr key={`${task.id}-exp`} style={{ borderBottom: "1px solid var(--border)" }}>
                           <td />
-                          <td colSpan={6} style={{ padding: "12px 16px 20px", background: "#ffffff" }}>
-                            <ExpandedRow task={task} onOpen={() => onSelectTask(task)} />
+                          <td colSpan={6} style={{ padding: "12px 16px 20px", background: "var(--surface)" }}>
+                            <ExpandedRow task={task} onOpen={() => onSelectTask(task)} onRefresh={() => listTasks().then((t) => setTasks(t ?? [])).catch(() => {})} />
                           </td>
                         </tr>
                       )}
@@ -150,7 +158,7 @@ export function HistoryPage({ onSelectTask, refreshTrigger }: Props) {
             <div style={{
               display: "flex", alignItems: "center", justifyContent: "space-between",
               padding: "12px 20px", borderTop: "1px solid var(--border)",
-              background: "#ffffff",
+              background: "var(--surface)",
             }}>
               <span style={{ fontSize: "var(--text-xs)", color: "var(--text-3)" }}>
                 Showing {start + 1}–{Math.min(start + pageSize, tasks.length)} of {tasks.length}
@@ -161,14 +169,14 @@ export function HistoryPage({ onSelectTask, refreshTrigger }: Props) {
                   Per page
                   <select
                     value={pageSize}
-                    onChange={e => { setPageSize(Number(e.target.value)); setPage(1); }}
+                    onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}
                     style={{
                       fontSize: "var(--text-xs)", color: "var(--text)", background: "var(--surface)",
                       border: "1px solid var(--border-strong)", borderRadius: 5, padding: "3px 6px",
                       cursor: "pointer", outline: "none",
                     }}
                   >
-                    {PAGE_SIZE_OPTIONS.map(n => <option key={n} value={n}>{n}</option>)}
+                    {PAGE_SIZE_OPTIONS.map((n) => <option key={n} value={n}>{n}</option>)}
                   </select>
                 </label>
 
@@ -188,27 +196,62 @@ export function HistoryPage({ onSelectTask, refreshTrigger }: Props) {
   );
 }
 
-/* ── Expanded row detail ── */
-function ExpandedRow({ task, onOpen }: { task: TaskDetail; onOpen: () => void }) {
+// ── Expanded row detail ────────────────────────────────────────────────────────
+function ExpandedRow({ task, onOpen, onRefresh }: { task: TaskDetail; onOpen: () => void; onRefresh: () => void }) {
   const clean = task.input_text.replace(/^\[.*?\]\s*/g, "");
+  const [cancelling, setCancelling] = useState(false);
+
+  const handleCancel = async () => {
+    setCancelling(true);
+    await cancelTask(task.id).catch(() => {});
+    // Poll until the status leaves the active states (server update is async).
+    const poll = async (attempts: number) => {
+      await new Promise((r) => setTimeout(r, 600));
+      onRefresh();
+      if (attempts > 1) poll(attempts - 1);
+    };
+    poll(4);
+    setCancelling(false);
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       <p style={{ fontSize: "var(--text-sm)", color: "var(--text-2)", lineHeight: 1.7, whiteSpace: "pre-wrap", maxWidth: 600 }}>
         {clean}
       </p>
 
-      {task.error_msg && (
+      {task.error_msg && task.status !== "cancelled" && (
         <div className="error-box" style={{ fontSize: "var(--text-xs)", padding: "8px 12px" }}>
           {task.error_msg}
+        </div>
+      )}
+      {task.status === "cancelled" && (
+        <div style={{ fontSize: "var(--text-xs)", color: "var(--amber)", background: "var(--amber-bg)", border: "1px solid #fde68a", borderRadius: "var(--radius-sm)", padding: "8px 12px" }}>
+          Task was cancelled by user.
         </div>
       )}
 
       <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
         {task.pr_url && (
-          <a href={task.pr_url} target="_blank" rel="noopener noreferrer" className="btn btn-sm"
-            style={{ color: "var(--green)", borderColor: "#a7d9bc", background: "var(--green-bg)" }}>
+          <a
+            href={task.pr_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="btn btn-sm"
+            style={{ color: "var(--green)", borderColor: "#a7d9bc", background: "var(--green-bg)" }}
+          >
             View PR ↗
           </a>
+        )}
+        {(task.status === "waiting_for_input" || task.status === "running" || task.status === "queued") && (
+          <button
+            className="btn btn-sm"
+            style={{ color: "var(--red)", borderColor: "#f5c6c2" }}
+            onClick={handleCancel}
+            disabled={cancelling}
+          >
+            {cancelling ? "Cancelling…" : "⏹ Cancel"}
+          </button>
         )}
         <button className="btn btn-sm" onClick={onOpen}>
           Full detail →
@@ -221,7 +264,7 @@ function ExpandedRow({ task, onOpen }: { task: TaskDetail; onOpen: () => void })
   );
 }
 
-/* ── Small helpers ── */
+// ── Small helpers ─────────────────────────────────────────────────────────────
 function Th({ children, style }: { children?: React.ReactNode; style?: React.CSSProperties }) {
   return (
     <th style={{
@@ -274,4 +317,11 @@ function fmt(iso: string): string {
 function durationSec(start?: string, end?: string): number | null {
   if (!start || !end) return null;
   return Math.round((new Date(end).getTime() - new Date(start).getTime()) / 1000);
+}
+
+function humanizeDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return s > 0 ? `${m}m ${s}s` : `${m}m`;
 }
