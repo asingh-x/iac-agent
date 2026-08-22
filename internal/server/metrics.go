@@ -32,6 +32,16 @@ var (
 		Help: "Total LLM output tokens generated across all tasks.",
 	})
 
+	metricLLMCacheReadTokens = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "tfagent_llm_cache_read_tokens_total",
+		Help: "Total LLM prompt-cache tokens read (cache hits) across all tasks.",
+	})
+
+	metricLLMCacheCreatedTokens = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "tfagent_llm_cache_created_tokens_total",
+		Help: "Total LLM prompt-cache tokens created (cache misses/writes) across all tasks.",
+	})
+
 	metricActiveSSEConns = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "tfagent_active_sse_connections",
 		Help: "Number of currently open SSE streaming connections.",
@@ -41,4 +51,14 @@ var (
 		Name: "tfagent_queue_depth",
 		Help: "Current number of pending items in a named queue.",
 	}, []string{"queue"})
+
+	metricLLMConcurrencyUsed = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "tfagent_llm_concurrency_used",
+		Help: "Current number of LLM concurrency semaphore slots in use.",
+	})
+
+	metricLLMConcurrencyCapacity = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "tfagent_llm_concurrency_capacity",
+		Help: "Total configured LLM concurrency semaphore capacity.",
+	})
 )

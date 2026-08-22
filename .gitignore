@@ -54,3 +54,7 @@ coverage.out
 .claude
 .superpowers/
 docs/superpowers/
+# Local-only extra CA certs for building the sandbox image behind a
+# TLS-inspecting corporate proxy (see docker/sandbox/certs/README.md).
+docker/sandbox/certs/*.crt
+docker/sandbox/certs/*.pem

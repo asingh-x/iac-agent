@@ -7,7 +7,7 @@ COPY client/ ./
 RUN npm run build
 
 # ── Stage 2: Build Go server ──────────────────────────────────────────────────
-FROM golang:1.25-alpine AS go-builder
+FROM golang:1.26-alpine AS go-builder
 WORKDIR /app
 # Cache deps before copying source
 COPY go.mod go.sum ./
@@ -22,16 +22,12 @@ FROM alpine:3.20
 RUN apk add --no-cache ca-certificates tzdata
 RUN addgroup -g 1000 tfagent && adduser -D -u 1000 -G tfagent tfagent
 WORKDIR /app
-RUN mkdir -p /data && chown tfagent:tfagent /data /app
+RUN chown tfagent:tfagent /app
 
 COPY --from=go-builder /app/tf-agent-server .
 COPY --from=ui-builder /app/client/dist ./client/dist
 
 EXPOSE 8080
-
-VOLUME ["/data"]
-
-ENV TF_AGENT_DB_PATH=/data/tf-agent.db
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -qO- http://localhost:8080/healthz || exit 1

@@ -16,6 +16,15 @@ type User struct {
 	CreatedAt time.Time
 }
 
+// Pause kinds recorded in Task.PendingKind. A task with status
+// "waiting_for_input" is paused on one of two very different prompts, and a
+// client reconnecting mid-pause has to know which: a free-text question needs
+// a text box, a tool-permission prompt needs approve/deny buttons.
+const (
+	PendingKindQuestion   = "question"   // ask_user: free-text answer expected
+	PendingKindPermission = "permission" // tool-permission prompt: allow/deny expected
+)
+
 // Task represents a submitted agent task.
 type Task struct {
 	ID              string     `json:"id"`
@@ -30,6 +39,7 @@ type Task struct {
 	ErrorMsg        string     `json:"error_msg,omitempty"`
 	Output          string     `json:"output,omitempty"`
 	PendingQuestion string     `json:"pending_question,omitempty"`
+	PendingKind     string     `json:"pending_kind,omitempty"` // "" | question | permission
 	CreatedAt       time.Time  `json:"created_at"`
 	StartedAt       *time.Time `json:"started_at,omitempty"`
 	CompletedAt     *time.Time `json:"completed_at,omitempty"`
@@ -87,11 +97,27 @@ type Store interface {
 	// Tasks
 	CreateTask(ctx context.Context, userID, inputType, inputText, outputType string) (*Task, error)
 	UpdateTaskStatus(ctx context.Context, id, status string) error
-	UpdateTaskPendingQuestion(ctx context.Context, id, question string) error
+	// UpdateTaskPendingQuestion records (or clears, with question == "") the
+	// prompt a task is paused on. kind is one of the PendingKind* constants
+	// when pausing, and "" when clearing.
+	UpdateTaskPendingQuestion(ctx context.Context, id, question, kind string) error
 	UpdateTaskResult(ctx context.Context, id, status, prURL, errorMsg, output string, inputTokens, outputTokens int) error
 	GetTask(ctx context.Context, id string) (*Task, error)
 	ListUserTasks(ctx context.Context, userID string, limit int) ([]*Task, error)
 	MarkStaleTasksFailed(ctx context.Context) error
+	// FailTasksOlderThan marks any row with status running/queued/
+	// waiting_for_input AND created_at older than maxAge as failed with
+	// errMsg. Unlike MarkStaleTasksFailed (which sweeps every non-terminal
+	// row unconditionally and is unsafe under queue_driver=nats — see its
+	// call site in cmd/server/main.go), this only ever touches rows that have
+	// been non-terminal for an unusually long time, so it's safe to run
+	// unconditionally under any queue driver: it never fails another pod's
+	// task that is simply, currently, legitimately still running. It exists
+	// to reconcile the narrow case a task's queue delivery is abandoned and
+	// redelivered until it exhausts the queue's max-delivery-attempts and has
+	// no other automatic path back to a terminal status. Returns the number
+	// of rows reconciled, for logging.
+	FailTasksOlderThan(ctx context.Context, maxAge time.Duration, errMsg string) (int, error)
 
 	// User settings
 	GetUserSettings(ctx context.Context, userID string) (*UserSettings, error)

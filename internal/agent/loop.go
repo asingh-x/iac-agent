@@ -365,7 +365,14 @@ func (a *Agent) executeSingleTool(ctx context.Context, call llm.ToolUseEvent, ch
 	if skill, ok := a.skills.Get(call.Name); ok {
 		output, execErr = skill.Execute(ctx, call.Input)
 	} else if tool, ok := a.tools.Get(call.Name); ok {
+		toolStart := time.Now()
 		output, execErr = tool.Execute(ctx, call.Input)
+		metricToolDuration.WithLabelValues(call.Name).Observe(time.Since(toolStart).Seconds())
+		result := "success"
+		if execErr != nil {
+			result = "error"
+		}
+		metricToolCalls.WithLabelValues(call.Name, result).Inc()
 	} else {
 		execErr = fmt.Errorf("unknown tool or skill: %s", call.Name)
 	}

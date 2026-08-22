@@ -1,15 +1,17 @@
 package skills
 
 import (
-	_ "embed"
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/tf-agent/tf-agent/internal/sandbox"
 )
 
 //go:embed prompts/security_scan.md
@@ -17,7 +19,20 @@ var securityScanPrompt string
 
 // SecurityScanSkill runs checkov on a directory.
 // Input JSON: {"path": string (optional, default CWD)}
-type SecurityScanSkill struct{}
+type SecurityScanSkill struct {
+	// executor, when non-nil, routes checkov through a sandbox.Executor
+	// instead of running it directly on the host. Nil (the zero value, and
+	// what &SecurityScanSkill{} still gives you) preserves the original
+	// direct-host-exec behavior exactly.
+	executor sandbox.Executor
+}
+
+// NewSecurityScanSkill builds a SecurityScanSkill. Pass a non-nil executor
+// to run checkov inside a sandbox; pass nil to keep running it directly on
+// the host, exactly as before this package existed.
+func NewSecurityScanSkill(executor sandbox.Executor) *SecurityScanSkill {
+	return &SecurityScanSkill{executor: executor}
+}
 
 func (s *SecurityScanSkill) Name() string                         { return "SecurityScan" }
 func (s *SecurityScanSkill) IsReadOnly() bool                     { return true }
@@ -40,7 +55,7 @@ func (s *SecurityScanSkill) Schema() json.RawMessage {
 	}`)
 }
 
-func (s *SecurityScanSkill) Execute(_ context.Context, input json.RawMessage) (string, error) {
+func (s *SecurityScanSkill) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	var args struct {
 		Path string `json:"path"`
 	}
@@ -59,6 +74,16 @@ func (s *SecurityScanSkill) Execute(_ context.Context, input json.RawMessage) (s
 		}
 	}
 
+	if s.executor != nil {
+		return s.runSandboxed(ctx, scanPath)
+	}
+	return s.runHost(scanPath)
+}
+
+// runHost runs checkov directly on the host process — unchanged from before
+// internal/sandbox existed. This is what sandbox_enabled = false (the
+// default) uses.
+func (s *SecurityScanSkill) runHost(scanPath string) (string, error) {
 	if _, err := exec.LookPath("checkov"); err != nil {
 		return "checkov not installed — skipping security scan. Install with: pip install checkov", nil
 	}
@@ -79,6 +104,28 @@ func (s *SecurityScanSkill) Execute(_ context.Context, input json.RawMessage) (s
 	}
 
 	return parseCheckovOutput(stdout.Bytes())
+}
+
+// runSandboxed runs checkov through s.executor. scanPath is bind-mounted at
+// /workspace by the executor (see sandbox.DockerExecutor.Run) and set as the
+// container's working directory, so checkov is pointed at "." rather than
+// the host-absolute scanPath.
+func (s *SecurityScanSkill) runSandboxed(ctx context.Context, scanPath string) (string, error) {
+	runCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+
+	stdout, stderr, err := s.executor.Run(runCtx, scanPath, "checkov", "-d", ".", "-o", "json", "--quiet")
+
+	// checkov exits non-zero when failures are found — still parse the output.
+	// Only stdout is ever parsed: checkov --quiet still emits a WARNI log line
+	// plus a Python traceback on stderr when it can't reach
+	// api0.prismacloud.io for its guidelines mapping, which is guaranteed to
+	// happen under --network=none — that noise must never be fed to
+	// parseCheckovOutput, matching runHost's existing stdout/stderr split.
+	if err != nil && stdout == "" {
+		return "", fmt.Errorf("SecurityScan: checkov failed: %v — %s", err, stderr)
+	}
+	return parseCheckovOutput([]byte(stdout))
 }
 
 type checkovOutput struct {

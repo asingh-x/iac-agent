@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -166,6 +167,27 @@ func TestServer_Health(t *testing.T) {
 	}
 	if _, ok := depth["default"]; !ok {
 		t.Errorf("queue_depth missing \"default\" entry: %v", depth)
+	}
+
+	conc, ok := body["llm_concurrency"].(map[string]any)
+	if !ok {
+		t.Fatalf("health response missing llm_concurrency object: %v", body)
+	}
+	if cap, ok := conc["capacity"].(float64); !ok || cap != float64(env.cfg.Server.LLMConcurrency) {
+		t.Errorf("llm_concurrency.capacity = %v, want %d", conc["capacity"], env.cfg.Server.LLMConcurrency)
+	}
+	if _, ok := conc["used"]; !ok {
+		t.Errorf("llm_concurrency missing 'used': %v", conc)
+	}
+
+	errRate, ok := body["task_error_rate"].(map[string]any)
+	if !ok {
+		t.Fatalf("health response missing task_error_rate object: %v", body)
+	}
+	for _, field := range []string{"rate", "failed", "total"} {
+		if _, ok := errRate[field]; !ok {
+			t.Errorf("task_error_rate missing %q: %v", field, errRate)
+		}
 	}
 }
 
@@ -525,6 +547,131 @@ func TestHub_PublishToUnknownTask(t *testing.T) {
 	hub := server.NewHub()
 	// Should not panic.
 	hub.Publish("does-not-exist", server.ServerEvent{Type: "text"})
+}
+
+// fakeEventRelay is a minimal in-process stand-in for a real cross-pod
+// relay, used to test Hub's fallback behavior without a live NATS server.
+type fakeEventRelay struct {
+	ch chan server.ServerEvent
+}
+
+func (f *fakeEventRelay) Publish(string, server.ServerEvent) {}
+
+func (f *fakeEventRelay) Subscribe(string) (<-chan server.ServerEvent, func()) {
+	return f.ch, func() {}
+}
+
+func TestHub_ServeSSE_FallsBackToRelayWhenTaskNotLocal(t *testing.T) {
+	hub := server.NewHub()
+	relay := &fakeEventRelay{ch: make(chan server.ServerEvent, 4)}
+	hub.SetRelay(relay)
+
+	// Simulate the "owning" pod publishing straight onto the relay channel —
+	// this task was never Create()'d on this Hub, so the only way ServeSSE
+	// can see it is via the relay fallback.
+	relay.ch <- server.ServerEvent{Type: "text", Text: "from another pod"}
+	relay.ch <- server.ServerEvent{Type: "done"}
+
+	req := httptest.NewRequest("GET", "/v1/tasks/remote-task/stream", nil)
+	rec := httptest.NewRecorder()
+
+	start := time.Now()
+	hub.ServeSSE(rec, req, "remote-task", nil)
+	elapsed := time.Since(start)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "from another pod") {
+		t.Errorf("SSE body missing relayed event, got: %q", body)
+	}
+	if !strings.Contains(body, `"type":"done"`) {
+		t.Errorf("SSE body missing terminal done event, got: %q", body)
+	}
+	// The relay subscription is opened before the local-ownership wait, so
+	// events already in flight are streamed straight away rather than after
+	// that whole window has expired (during which they'd have been lost).
+	if elapsed > 2*time.Second {
+		t.Errorf("ServeSSE took %v to start streaming relayed events, want immediate", elapsed)
+	}
+}
+
+// --- Snapshot reconstruction (what a client gets on connect / reconnect) ---
+
+func TestInitialSnapshotEvent(t *testing.T) {
+	cases := []struct {
+		name     string
+		task     *db.Task
+		wantType string
+		wantTool string
+		wantText string
+	}{
+		{
+			name:     "permission pause reconstructs as a permission_request",
+			task:     &db.Task{Status: "waiting_for_input", PendingQuestion: "Approve Bash: terraform apply -auto-approve", PendingKind: db.PendingKindPermission},
+			wantType: "permission_request",
+			wantTool: "Bash",
+			wantText: "terraform apply -auto-approve",
+		},
+		{
+			name:     "ask_user pause reconstructs as waiting_for_input",
+			task:     &db.Task{Status: "waiting_for_input", PendingQuestion: "Which region?", PendingKind: db.PendingKindQuestion},
+			wantType: "waiting_for_input",
+			wantText: "Which region?",
+		},
+		{
+			name:     "row written before pending_kind existed still renders as a question",
+			task:     &db.Task{Status: "waiting_for_input", PendingQuestion: "Which region?"},
+			wantType: "waiting_for_input",
+			wantText: "Which region?",
+		},
+		{
+			name:     "running",
+			task:     &db.Task{Status: "running"},
+			wantType: "status",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := server.InitialSnapshotEvent(tc.task)
+			if ev.Type != tc.wantType {
+				t.Errorf("Type = %q, want %q", ev.Type, tc.wantType)
+			}
+			if ev.Tool != tc.wantTool {
+				t.Errorf("Tool = %q, want %q", ev.Tool, tc.wantTool)
+			}
+			if tc.wantText != "" && ev.Text != tc.wantText {
+				t.Errorf("Text = %q, want %q", ev.Text, tc.wantText)
+			}
+		})
+	}
+}
+
+func TestPermissionPromptRoundTrip(t *testing.T) {
+	tool, preview := server.ParsePermissionPrompt(server.FormatPermissionPrompt("Bash", "rm -rf /tmp/x: really"))
+	if tool != "Bash" {
+		t.Errorf("tool = %q, want Bash", tool)
+	}
+	if preview != "rm -rf /tmp/x: really" {
+		t.Errorf("preview = %q, want the full original preview (including its own colon)", preview)
+	}
+
+	// Anything that isn't in the expected shape comes back verbatim.
+	if tool, preview := server.ParsePermissionPrompt("Which region?"); tool != "" || preview != "Which region?" {
+		t.Errorf("got (%q, %q), want (\"\", %q)", tool, preview, "Which region?")
+	}
+}
+
+func TestHub_ServeSSE_SendsInitialSnapshotFirst(t *testing.T) {
+	hub := server.NewHub()
+	req := httptest.NewRequest("GET", "/v1/tasks/finished-task/stream", nil)
+	rec := httptest.NewRecorder()
+
+	hub.ServeSSE(rec, req, "finished-task", &server.ServerEvent{Type: "done", PRUrl: "https://example.com/pr/1"})
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "https://example.com/pr/1") {
+		t.Errorf("SSE body missing initial snapshot event, got: %q", body)
+	}
 }
 
 // --- Auth helpers ---
@@ -1071,5 +1218,123 @@ func TestServer_AuditLog_ForbiddenForMember(t *testing.T) {
 	resp := env.do("GET", "/v1/admin/audit-log", env.memberToken, nil)
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("status = %d, want 403", resp.StatusCode)
+	}
+}
+
+// --- Runner control relay fallback ---
+
+// fakeControlRelay is a hand-rolled ControlRelay for testing Runner's
+// fallback behavior without a real NATS server.
+type fakeControlRelay struct {
+	answerErr, permissionErr, cancelErr error
+	gotAnswer                           string
+	gotAllow                            bool
+	cancelCalled                        bool
+}
+
+func (f *fakeControlRelay) RequestAnswer(_ context.Context, _ string, answer string) error {
+	f.gotAnswer = answer
+	return f.answerErr
+}
+
+func (f *fakeControlRelay) RequestPermission(_ context.Context, _ string, allow bool) error {
+	f.gotAllow = allow
+	return f.permissionErr
+}
+
+func (f *fakeControlRelay) RequestCancel(context.Context, string) error {
+	f.cancelCalled = true
+	return f.cancelErr
+}
+
+func TestRunner_SendAnswer_FallsBackToRelayWhenNotLocal(t *testing.T) {
+	store := db.NewMemoryStore()
+	hub := server.NewHub()
+	q := queue.NewMemoryQueue(10)
+	runner := server.NewRunner(hub, store, q, &llm.MockProvider{}, config.Defaults(), slog.Default())
+
+	relay := &fakeControlRelay{}
+	runner.SetControlRelay(relay)
+
+	// No task named "remote-task" was ever started on this Runner, so the
+	// local lookup must miss and fall through to the relay.
+	if err := runner.SendAnswer("remote-task", "the answer"); err != nil {
+		t.Fatalf("SendAnswer: %v", err)
+	}
+	if relay.gotAnswer != "the answer" {
+		t.Errorf("relay.gotAnswer = %q, want %q", relay.gotAnswer, "the answer")
+	}
+}
+
+func TestRunner_SendPermissionResponse_FallsBackToRelayWhenNotLocal(t *testing.T) {
+	store := db.NewMemoryStore()
+	hub := server.NewHub()
+	q := queue.NewMemoryQueue(10)
+	runner := server.NewRunner(hub, store, q, &llm.MockProvider{}, config.Defaults(), slog.Default())
+
+	relay := &fakeControlRelay{}
+	runner.SetControlRelay(relay)
+
+	// A deny (false) is the interesting case: it is the security-relevant
+	// decision and coincides with Go's zero value, so it must still cross the
+	// relay as an explicit value.
+	if err := runner.SendPermissionResponse("remote-task", false); err != nil {
+		t.Fatalf("SendPermissionResponse: %v", err)
+	}
+	if relay.gotAllow != false {
+		t.Errorf("relay.gotAllow = %v, want false", relay.gotAllow)
+	}
+
+	if err := runner.SendPermissionResponse("remote-task", true); err != nil {
+		t.Fatalf("SendPermissionResponse: %v", err)
+	}
+	if relay.gotAllow != true {
+		t.Errorf("relay.gotAllow = %v, want true", relay.gotAllow)
+	}
+}
+
+func TestRunner_CancelTask_FallsBackToRelayWhenNotLocal(t *testing.T) {
+	store := db.NewMemoryStore()
+	hub := server.NewHub()
+	q := queue.NewMemoryQueue(10)
+	runner := server.NewRunner(hub, store, q, &llm.MockProvider{}, config.Defaults(), slog.Default())
+
+	relay := &fakeControlRelay{}
+	runner.SetControlRelay(relay)
+
+	if err := runner.CancelTask("remote-task"); err != nil {
+		t.Fatalf("CancelTask: %v", err)
+	}
+	if !relay.cancelCalled {
+		t.Error("expected CancelTask to fall through to the cross-pod relay for a task this pod does not own")
+	}
+}
+
+func TestRunner_CancelTask_RelayErrorSurfaces(t *testing.T) {
+	store := db.NewMemoryStore()
+	hub := server.NewHub()
+	q := queue.NewMemoryQueue(10)
+	runner := server.NewRunner(hub, store, q, &llm.MockProvider{}, config.Defaults(), slog.Default())
+
+	runner.SetControlRelay(&fakeControlRelay{cancelErr: errors.New("task not found on any pod")})
+
+	if err := runner.CancelTask("remote-task"); err == nil {
+		t.Error("expected an error when no pod owns the task")
+	}
+}
+
+func TestRunner_SendAnswer_NoRelayConfigured_ReturnsOriginalError(t *testing.T) {
+	store := db.NewMemoryStore()
+	hub := server.NewHub()
+	q := queue.NewMemoryQueue(10)
+	runner := server.NewRunner(hub, store, q, &llm.MockProvider{}, config.Defaults(), slog.Default())
+	// No SetControlRelay call — memory-queue / single-process behavior.
+
+	err := runner.SendAnswer("no-such-task", "x")
+	if err == nil {
+		t.Fatal("expected an error for an unknown task with no relay configured")
+	}
+	if !strings.Contains(err.Error(), "not waiting for input") {
+		t.Errorf("err = %v, want it to mention 'not waiting for input' (unchanged pre-relay behavior)", err)
 	}
 }

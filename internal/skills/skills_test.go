@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/tf-agent/tf-agent/internal/sandbox"
 )
 
 // --- Registry ---
@@ -404,9 +407,9 @@ func TestSecurityScan_Metadata(t *testing.T) {
 
 func TestParseRepoURL_Valid(t *testing.T) {
 	cases := []struct {
-		input         string
-		wantOwner     string
-		wantRepo      string
+		input     string
+		wantOwner string
+		wantRepo  string
 	}{
 		{"github.com/org/repo", "org", "repo"},
 		{"https://github.com/org/repo", "org", "repo"},
@@ -503,5 +506,542 @@ func TestValidate_Execute_MissingPath(t *testing.T) {
 	}
 	if out == "" {
 		t.Error("expected non-empty output")
+	}
+}
+
+// --- ValidateSkill structured error parsing ---
+//
+// The JSON fixtures below are real captured output, not hand-written: they
+// come from actually running `terraform validate -json -no-color`
+// (Terraform v1.11.4) and `tflint --format=json` (TFLint v0.61.0) against
+// deliberately broken .tf fixtures, per the brief's instruction not to
+// assume the tools' JSON shapes.
+//
+// Fixture 1 — main.tf with an unsupported argument and a reference to an
+// undeclared variable:
+//
+//	resource "aws_instance" "example" {
+//	  ami           = "ami-123456"
+//	  instance_type = "t2.micro"
+//	  foo           = "bar"
+//	}
+//
+//	resource "aws_s3_bucket" "b" {
+//	  bucket = var.undeclared_var
+//	}
+//
+// Fixture 2 — main.tf with an unterminated quoted string (a syntax error
+// tflint can't even parse past, landing in tflint's "errors" array rather
+// than "issues"):
+//
+//	resource "aws_instance" "example" {
+//	  ami = "ami-123456
+//	}
+
+const realTerraformValidateJSON = `{
+  "format_version": "1.0",
+  "valid": false,
+  "error_count": 2,
+  "warning_count": 0,
+  "diagnostics": [
+    {
+      "severity": "error",
+      "summary": "Unsupported argument",
+      "detail": "An argument named \"foo\" is not expected here.",
+      "range": {
+        "filename": "main.tf",
+        "start": {
+          "line": 4,
+          "column": 3,
+          "byte": 98
+        },
+        "end": {
+          "line": 4,
+          "column": 6,
+          "byte": 101
+        }
+      },
+      "snippet": {
+        "context": "resource \"aws_instance\" \"example\"",
+        "code": "  foo           = \"bar\"",
+        "start_line": 4,
+        "highlight_start_offset": 2,
+        "highlight_end_offset": 5,
+        "values": []
+      }
+    },
+    {
+      "severity": "error",
+      "summary": "Reference to undeclared input variable",
+      "detail": "An input variable with the name \"undeclared_var\" has not been declared. This variable can be declared with a variable \"undeclared_var\" {} block.",
+      "range": {
+        "filename": "main.tf",
+        "start": {
+          "line": 8,
+          "column": 12,
+          "byte": 165
+        },
+        "end": {
+          "line": 8,
+          "column": 30,
+          "byte": 183
+        }
+      },
+      "snippet": {
+        "context": "resource \"aws_s3_bucket\" \"b\"",
+        "code": "  bucket = var.undeclared_var",
+        "start_line": 8,
+        "highlight_start_offset": 11,
+        "highlight_end_offset": 29,
+        "values": []
+      }
+    }
+  ]
+}`
+
+const realTerraformValidateOKJSON = `{
+  "format_version": "1.0",
+  "valid": true,
+  "error_count": 0,
+  "warning_count": 0,
+  "diagnostics": []
+}`
+
+const realTflintIssuesJSON = `{"issues":[{"rule":{"name":"terraform_required_version","severity":"warning","link":"https://github.com/terraform-linters/tflint-ruleset-terraform/blob/v0.14.1/docs/rules/terraform_required_version.md"},"message":"terraform \"required_version\" attribute is required","range":{"filename":"main.tf","start":{"line":1,"column":1},"end":{"line":1,"column":1}},"callers":[],"fixable":false,"fixed":false},{"rule":{"name":"terraform_required_providers","severity":"warning","link":"https://github.com/terraform-linters/tflint-ruleset-terraform/blob/v0.14.1/docs/rules/terraform_required_providers.md"},"message":"Missing version constraint for provider \"aws\" in ` + "`required_providers`" + `","range":{"filename":"main.tf","start":{"line":7,"column":1},"end":{"line":7,"column":29}},"callers":[],"fixable":false,"fixed":false}],"errors":[]}`
+
+const realTflintErrorsJSON = `{"issues":[],"errors":[{"summary":"Invalid multi-line string","message":"Quoted strings may not be split over multiple lines. To produce a multi-line string, either use the \n escape to represent a newline character or use the \"heredoc\" multi-line template syntax.","severity":"error","range":{"filename":"main.tf","start":{"line":2,"column":20},"end":{"line":3,"column":1}}},{"summary":"Unterminated template string","message":"No closing marker was found for the string.","severity":"error","range":{"filename":"main.tf","start":{"line":2,"column":20},"end":{"line":3,"column":1}}}]}`
+
+func TestParseTerraformValidateJSON_RealBrokenOutput(t *testing.T) {
+	out, err := parseTerraformValidateJSON([]byte(realTerraformValidateJSON))
+	if err != nil {
+		t.Fatalf("parseTerraformValidateJSON: %v", err)
+	}
+	if !strings.Contains(out, "FAILED") {
+		t.Errorf("expected FAILED status, got: %q", out)
+	}
+	if !strings.Contains(out, "2 error(s)") {
+		t.Errorf("expected error count, got: %q", out)
+	}
+	if !strings.Contains(out, "main.tf:4") {
+		t.Errorf("expected file:line for first diagnostic, got: %q", out)
+	}
+	if !strings.Contains(out, "Unsupported argument") {
+		t.Errorf("expected first diagnostic summary, got: %q", out)
+	}
+	if !strings.Contains(out, `An argument named "foo" is not expected here.`) {
+		t.Errorf("expected first diagnostic detail, got: %q", out)
+	}
+	if !strings.Contains(out, "main.tf:8") {
+		t.Errorf("expected file:line for second diagnostic, got: %q", out)
+	}
+	if !strings.Contains(out, "Reference to undeclared input variable") {
+		t.Errorf("expected second diagnostic summary, got: %q", out)
+	}
+	// Must not just be the raw JSON reformatted — the noisy "snippet" field
+	// (source context/highlight offsets) is not needed for a compact
+	// actionable summary and should not leak through.
+	if strings.Contains(out, "highlight_start_offset") || strings.Contains(out, "format_version") {
+		t.Errorf("expected structured summary, not raw JSON fields: %q", out)
+	}
+}
+
+func TestParseTerraformValidateJSON_RealValidOutput(t *testing.T) {
+	out, err := parseTerraformValidateJSON([]byte(realTerraformValidateOKJSON))
+	if err != nil {
+		t.Fatalf("parseTerraformValidateJSON: %v", err)
+	}
+	if !strings.Contains(out, "OK") {
+		t.Errorf("expected OK status for valid config, got: %q", out)
+	}
+}
+
+func TestParseTerraformValidateJSON_InvalidInput(t *testing.T) {
+	cases := []string{"", "not json at all", "Usage: terraform validate [options] [dir]\n"}
+	for _, c := range cases {
+		if _, err := parseTerraformValidateJSON([]byte(c)); err == nil {
+			t.Errorf("parseTerraformValidateJSON(%q): expected error, got nil", c)
+		}
+	}
+}
+
+func TestParseTflintJSON_RealIssuesOutput(t *testing.T) {
+	out, err := parseTflintJSON([]byte(realTflintIssuesJSON))
+	if err != nil {
+		t.Fatalf("parseTflintJSON: %v", err)
+	}
+	if !strings.Contains(out, "2 issue(s), 0 error(s)") {
+		t.Errorf("expected issue/error counts, got: %q", out)
+	}
+	if !strings.Contains(out, "main.tf:1") {
+		t.Errorf("expected file:line for first issue, got: %q", out)
+	}
+	if !strings.Contains(out, "terraform_required_version") {
+		t.Errorf("expected rule name, got: %q", out)
+	}
+	if !strings.Contains(out, "warning") {
+		t.Errorf("expected severity, got: %q", out)
+	}
+}
+
+func TestParseTflintJSON_RealErrorsOutput(t *testing.T) {
+	out, err := parseTflintJSON([]byte(realTflintErrorsJSON))
+	if err != nil {
+		t.Fatalf("parseTflintJSON: %v", err)
+	}
+	if !strings.Contains(out, "0 issue(s), 2 error(s)") {
+		t.Errorf("expected issue/error counts, got: %q", out)
+	}
+	if !strings.Contains(out, "main.tf:2") {
+		t.Errorf("expected file:line, got: %q", out)
+	}
+	if !strings.Contains(out, "Invalid multi-line string") {
+		t.Errorf("expected error summary, got: %q", out)
+	}
+}
+
+func TestParseTflintJSON_InvalidInput(t *testing.T) {
+	cases := []string{"", "not json", "tflint: command not found\n"}
+	for _, c := range cases {
+		if _, err := parseTflintJSON([]byte(c)); err == nil {
+			t.Errorf("parseTflintJSON(%q): expected error, got nil", c)
+		}
+	}
+}
+
+// TestFormatTerraformValidateResult_FallsBackToRawText proves the
+// fallback-to-raw-text path is actually exercised: when the command's
+// combined output isn't valid terraform validate JSON (e.g. the binary
+// isn't installed and exec.LookPath failed before anything ran), the
+// original raw-text-plus-error behavior is preserved rather than a parse
+// error being silently swallowed.
+func TestFormatTerraformValidateResult_FallsBackToRawText(t *testing.T) {
+	runErr := &exec.Error{Name: "terraform", Err: exec.ErrNotFound}
+	got := formatTerraformValidateResult("", runErr)
+	if !strings.Contains(got, "terraform not found or error") {
+		t.Errorf("expected fallback error message, got: %q", got)
+	}
+	if !strings.Contains(got, runErr.Error()) {
+		t.Errorf("expected underlying error text preserved, got: %q", got)
+	}
+}
+
+func TestFormatTerraformValidateResult_PlainTextOutput_NoError(t *testing.T) {
+	// Some failure modes (e.g. a crash) could plausibly print plain text to
+	// stdout/stderr with a nil Go error. The raw text must still come
+	// through rather than being dropped.
+	got := formatTerraformValidateResult("panic: something went very wrong\n", nil)
+	if !strings.Contains(got, "panic: something went very wrong") {
+		t.Errorf("expected raw text passthrough, got: %q", got)
+	}
+}
+
+// TestFormatTerraformValidateResult_NonZeroExitWithValidJSON_UsesStructuredSummary
+// is the regression test for the pre-existing bug this change fixes:
+// terraform validate exits 1 whenever it finds errors, so the old code
+// treated that as "terraform not found or error" and discarded the actual
+// (valid, informative) JSON diagnostics. A non-nil runErr must not override
+// a successful JSON parse.
+func TestFormatTerraformValidateResult_NonZeroExitWithValidJSON_UsesStructuredSummary(t *testing.T) {
+	runErr := &exec.ExitError{}
+	got := formatTerraformValidateResult(realTerraformValidateJSON, runErr)
+	if strings.Contains(got, "not found or error") {
+		t.Errorf("valid JSON diagnostics must not be discarded just because the process exited non-zero: %q", got)
+	}
+	if !strings.Contains(got, "Unsupported argument") {
+		t.Errorf("expected structured diagnostics, got: %q", got)
+	}
+}
+
+func TestFormatTflintResult_FallsBackToRawText(t *testing.T) {
+	runErr := &exec.Error{Name: "tflint", Err: exec.ErrNotFound}
+	got := formatTflintResult("", runErr)
+	if !strings.Contains(got, "tflint not found or error") {
+		t.Errorf("expected fallback error message, got: %q", got)
+	}
+	if !strings.Contains(got, runErr.Error()) {
+		t.Errorf("expected underlying error text preserved, got: %q", got)
+	}
+}
+
+func TestFormatTflintResult_NonZeroExitWithValidJSON_UsesStructuredSummary(t *testing.T) {
+	// tflint exits 2 when it finds lint issues — same class of bug as
+	// terraform validate's exit 1 above.
+	runErr := &exec.ExitError{}
+	got := formatTflintResult(realTflintIssuesJSON, runErr)
+	if strings.Contains(got, "not found or error") {
+		t.Errorf("valid JSON issues must not be discarded just because the process exited non-zero: %q", got)
+	}
+	if !strings.Contains(got, "terraform_required_version") {
+		t.Errorf("expected structured issues, got: %q", got)
+	}
+}
+
+// requireTerraformAndTflint skips the test if either binary isn't on PATH,
+// so `go test ./...` stays green in environments without them installed.
+func requireTerraformAndTflint(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("terraform"); err != nil {
+		t.Skip("terraform not installed — skipping real-tool integration test")
+	}
+	if _, err := exec.LookPath("tflint"); err != nil {
+		t.Skip("tflint not installed — skipping real-tool integration test")
+	}
+}
+
+// TestValidateSkill_Execute_RealTools_StructuredOutput runs ValidateSkill.Execute
+// end-to-end against real terraform and tflint binaries on a deliberately
+// broken fixture, proving the end-to-end output is the structured summary —
+// concrete file:line + message — rather than a raw JSON dump the model
+// would have to parse itself.
+//
+// The fixture deliberately uses the built-in terraform_data resource type
+// (ships with the terraform binary itself, "terraform.io/builtin/terraform")
+// instead of a registry provider like aws_instance: `terraform init` for an
+// aws_instance fixture has to download the hashicorp/aws provider plugin,
+// which was observed taking ~55s in this environment — dangerously close to
+// ValidateSkill.Execute's 60s total budget for init+validate combined, and
+// unrelated to what this test is actually verifying (JSON parsing, not
+// provider download speed). terraform_data still exercises a real
+// schema-validated "Unsupported argument" diagnostic with zero network
+// dependency.
+func TestValidateSkill_Execute_RealTools_StructuredOutput(t *testing.T) {
+	requireTerraformAndTflint(t)
+
+	dir := t.TempDir()
+	tf := "resource \"terraform_data\" \"example\" {\n" +
+		"  input = \"hello\"\n" +
+		"  foo   = \"bar\"\n" +
+		"}\n\n" +
+		"output \"undeclared\" {\n" +
+		"  value = var.undeclared_var\n" +
+		"}\n"
+	if err := os.WriteFile(filepath.Join(dir, "main.tf"), []byte(tf), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	s := &ValidateSkill{}
+	input, _ := json.Marshal(map[string]any{"path": dir})
+	out, err := s.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	if !strings.Contains(out, "=== tflint ===") || !strings.Contains(out, "=== terraform validate ===") {
+		t.Fatalf("expected both section headers, got: %q", out)
+	}
+	if !strings.Contains(out, "main.tf:3") {
+		t.Errorf("expected precise file:line for the unsupported-argument error, got: %q", out)
+	}
+	if !strings.Contains(out, "Unsupported argument") {
+		t.Errorf("expected terraform validate's diagnostic summary, got: %q", out)
+	}
+	if !strings.Contains(out, "Reference to undeclared input variable") {
+		t.Errorf("expected terraform validate's second diagnostic, got: %q", out)
+	}
+	// The whole point of this change: no raw JSON dump left for the model
+	// to parse itself.
+	if strings.Contains(out, `"format_version"`) || strings.Contains(out, `"diagnostics"`) {
+		t.Errorf("expected structured summary, not a raw terraform validate JSON dump: %q", out)
+	}
+	if strings.Contains(out, `"issues"`) || strings.Contains(out, `"rule"`) {
+		t.Errorf("expected structured summary, not a raw tflint JSON dump: %q", out)
+	}
+}
+
+// --- sandbox.Executor wiring (no Docker required — a fake stands in) ---
+
+// fakeExecutor is a sandbox.Executor test double that records every call it
+// receives instead of shelling out anywhere.
+type fakeExecutor struct {
+	calls  []fakeCall
+	out    string
+	errOut string
+	err    error
+}
+
+type fakeCall struct {
+	dir  string
+	name string
+	args []string
+}
+
+func (f *fakeExecutor) Run(_ context.Context, dir, name string, args ...string) (string, string, error) {
+	f.calls = append(f.calls, fakeCall{dir: dir, name: name, args: args})
+	return f.out, f.errOut, f.err
+}
+
+func TestNewValidateSkill_NilExecutor_MatchesZeroValue(t *testing.T) {
+	// NewValidateSkill(nil) must behave exactly like &ValidateSkill{} — the
+	// zero value is what pre-sandbox callers (and skills_test.go's other
+	// cases above) already rely on.
+	s := NewValidateSkill(nil)
+	if s.executor != nil {
+		t.Fatalf("expected nil executor, got %#v", s.executor)
+	}
+}
+
+func TestValidateSkill_RoutesThroughExecutor(t *testing.T) {
+	fe := &fakeExecutor{out: "{}\n", err: nil}
+	s := NewValidateSkill(fe)
+
+	dir := t.TempDir()
+	input, _ := json.Marshal(map[string]any{
+		"path":                   dir,
+		"run_tflint":             true,
+		"run_terraform_validate": false,
+	})
+	if _, err := s.Execute(context.Background(), input); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(fe.calls) != 1 {
+		t.Fatalf("expected 1 call to the executor, got %d: %+v", len(fe.calls), fe.calls)
+	}
+	call := fe.calls[0]
+	if call.dir != dir {
+		t.Errorf("dir = %q, want %q", call.dir, dir)
+	}
+	if call.name != "tflint" {
+		t.Errorf("name = %q, want tflint", call.name)
+	}
+}
+
+func TestNewSecurityScanSkill_NilExecutor_MatchesZeroValue(t *testing.T) {
+	s := NewSecurityScanSkill(nil)
+	if s.executor != nil {
+		t.Fatalf("expected nil executor, got %#v", s.executor)
+	}
+}
+
+func TestSecurityScanSkill_RoutesThroughExecutor(t *testing.T) {
+	fe := &fakeExecutor{
+		out: `{"results":{"passed_checks":[],"failed_checks":[]},"summary":{"passed":2,"failed":0}}`,
+	}
+	s := NewSecurityScanSkill(fe)
+
+	dir := t.TempDir()
+	input, _ := json.Marshal(map[string]any{"path": dir})
+	out, err := s.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "2 passed") {
+		t.Errorf("expected parsed checkov output, got: %q", out)
+	}
+
+	if len(fe.calls) != 1 {
+		t.Fatalf("expected 1 call to the executor, got %d: %+v", len(fe.calls), fe.calls)
+	}
+	call := fe.calls[0]
+	if call.dir != dir {
+		t.Errorf("dir = %q, want %q (the host path — the executor is responsible for mounting it)", call.dir, dir)
+	}
+	if call.name != "checkov" {
+		t.Errorf("name = %q, want checkov", call.name)
+	}
+	// scanPath is bind-mounted at /workspace and set as the container's cwd
+	// by the executor, so checkov must be pointed at "." rather than the
+	// host-absolute dir — passing the host path here would be meaningless
+	// inside the container's filesystem.
+	foundDot := false
+	for i, a := range call.args {
+		if a == "-d" && i+1 < len(call.args) && call.args[i+1] == "." {
+			foundDot = true
+		}
+	}
+	if !foundDot {
+		t.Errorf("expected -d . in sandboxed checkov args, got: %v", call.args)
+	}
+}
+
+func TestSecurityScanSkill_NilExecutor_UsesHostPath(t *testing.T) {
+	// With no executor configured (sandbox_enabled = false, the default),
+	// SecurityScanSkill must fall back to checking for checkov on the host
+	// PATH exactly as before this package existed — it must NOT consult
+	// any executor.
+	s := NewSecurityScanSkill(nil)
+	dir := t.TempDir()
+	input, _ := json.Marshal(map[string]any{"path": dir})
+	out, err := s.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatalf("unexpected hard error: %v", err)
+	}
+	// Without checkov installed in the test environment's PATH (typical CI),
+	// this should be the friendly skip message, not a crash.
+	if out == "" {
+		t.Error("expected non-empty output")
+	}
+}
+
+// --- SecurityScanSkill through a real Docker sandbox (regression coverage) ---
+
+// sandboxTestImage is the sandbox image built by `make sandbox-build` from
+// docker/sandbox/Dockerfile — see internal/sandbox/docker_test.go's
+// identical constant/skip pattern (duplicated here since this is a
+// different package and neither exports test helpers to the other).
+const sandboxTestImage = "iac-agent-sandbox:latest"
+
+// requireSandboxDocker skips the test if a Docker daemon or the sandbox
+// image isn't available, so `go test ./...` stays green for anyone who has
+// Docker but hasn't opted into the sandbox yet.
+func requireSandboxDocker(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not installed — skipping sandbox integration test")
+	}
+	if err := exec.Command("docker", "image", "inspect", sandboxTestImage).Run(); err != nil {
+		t.Skipf("sandbox image %s not built — run 'make sandbox-build' to enable this test", sandboxTestImage)
+	}
+}
+
+// TestSecurityScanSkill_RealDocker_ParsesRealCheckovOutput is the regression
+// test for the bug where checkov's guaranteed stderr noise under
+// --network=none (it always fails to reach api0.prismacloud.io for its
+// guidelines mapping, since the sandbox has no network by design) polluted
+// the merged stdout+stderr buffer that runSandboxed used to feed to
+// parseCheckovOutput — the JSON payload landed after a WARNI log line and a
+// Python traceback, so json.Unmarshal always failed for every sandboxed
+// SecurityScan call, regardless of what was being scanned.
+//
+// Unlike TestSecurityScanSkill_RoutesThroughExecutor (which uses fakeExecutor
+// and so never touches real checkov output or real stderr noise), this test
+// runs SecurityScanSkill.Execute end-to-end through a real
+// sandbox.DockerExecutor against a fixture with a real checkov-flaggable
+// misconfiguration, and asserts a real parsed summary comes back — not a
+// JSON-parse error.
+func TestSecurityScanSkill_RealDocker_ParsesRealCheckovOutput(t *testing.T) {
+	requireSandboxDocker(t)
+
+	dir := t.TempDir()
+	// A bare aws_s3_bucket with no versioning/encryption/logging/public-access
+	// block is a real checkov-flaggable misconfiguration (e.g. CKV_AWS_145,
+	// "Ensure that S3 buckets are encrypted with KMS by default") — checkov
+	// needs no `terraform init` to flag this, it parses the .tf file statically.
+	tf := "resource \"aws_s3_bucket\" \"bad\" {\n  bucket = \"my-insecure-bucket\"\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "main.tf"), []byte(tf), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	de := sandbox.NewDockerExecutor(sandboxTestImage, "", "")
+	s := NewSecurityScanSkill(de)
+
+	input, _ := json.Marshal(map[string]any{"path": dir})
+	out, err := s.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatalf("SecurityScanSkill.Execute through real Docker sandbox failed: %v\noutput: %q", err, out)
+	}
+
+	if strings.Contains(out, "parse checkov") {
+		t.Fatalf("got a checkov output parse failure instead of a real summary — the merged stdout+stderr bug has resurfaced: %q", out)
+	}
+	if !strings.Contains(out, "Security Scan:") {
+		t.Errorf("expected a parsed Security Scan summary, got: %q", out)
+	}
+	// The fixture is deliberately unencrypted/unversioned/unlogged, so
+	// checkov must report at least one real failed check against it — this
+	// is what proves stdout was actually parsed as real JSON, not just that
+	// no error happened to bubble up.
+	if !strings.Contains(out, "FAILED:") {
+		t.Errorf("expected at least one failed check for the deliberately misconfigured fixture, got: %q", out)
 	}
 }

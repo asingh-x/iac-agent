@@ -21,6 +21,7 @@ import (
 	"github.com/tf-agent/tf-agent/internal/llm"
 	"github.com/tf-agent/tf-agent/internal/permissions"
 	"github.com/tf-agent/tf-agent/internal/queue"
+	"github.com/tf-agent/tf-agent/internal/sandbox"
 	"github.com/tf-agent/tf-agent/internal/session"
 	"github.com/tf-agent/tf-agent/internal/skills"
 	"github.com/tf-agent/tf-agent/internal/taskctx"
@@ -36,6 +37,18 @@ type Runner struct {
 	cfg      *config.Config
 	sem      chan struct{} // global LLM concurrency semaphore
 	logger   *slog.Logger
+	relay    ControlRelay // cross-pod fallback for answer/permission/cancel
+
+	// semaphoreTimeout bounds how long run() will wait for a concurrency
+	// slot (global sem, or a per-user one) before failing the task cleanly
+	// instead of blocking indefinitely. See ConcurrencyUtilization and the
+	// semaphore-acquire section of run() for how it's used.
+	semaphoreTimeout time.Duration
+
+	// outcomes is a rolling window of the most recent task terminal
+	// outcomes, backing TaskErrorRate (surfaced via /healthz). Its zero
+	// value is ready to use.
+	outcomes taskOutcomeWindow
 
 	answerMu sync.Mutex
 	answers  map[string]chan string // taskID → pending answer channel
@@ -48,6 +61,12 @@ type Runner struct {
 
 	userSemMu sync.Mutex
 	userSems  map[string]chan struct{} // userID → per-user semaphore
+	// userSemLastUsed tracks, per userID, when that entry in userSems was
+	// last touched by a dispatch (see run()'s per-user semaphore section) —
+	// backs sweepIdleUserSemaphores, which reaps entries for users who have
+	// gone quiet, so userSems doesn't grow forever across the process
+	// lifetime. Always accessed under userSemMu, same as userSems itself.
+	userSemLastUsed map[string]time.Time
 
 	// inFlight tracks running task goroutines, for graceful shutdown.
 	// draining guards a real race: sync.WaitGroup forbids a concurrent Add
@@ -102,26 +121,67 @@ func (r *Runner) Shutdown(ctx context.Context) {
 	}
 }
 
-// CancelTask cancels a running task. Returns an error if the task is not running.
-func (r *Runner) CancelTask(taskID string) error {
+// controlRelayTimeout bounds every cross-pod control request (answer /
+// permission / cancel). It MUST be bounded: NATS core request-reply only
+// fast-fails with ErrNoResponders when *zero* subscriptions exist on the
+// subject, and every pod subscribes to "tf.control.*" — so a request for a
+// task no pod owns has interest but no responder, and would block forever on
+// an unbounded context, hanging the HTTP handler goroutine that called it
+// (the server sets WriteTimeout: 0 for SSE, so nothing else rescues it).
+//
+// A var, not a const, purely so tests can shorten it; nothing mutates it at
+// runtime.
+var controlRelayTimeout = 5 * time.Second
+
+// relayContext returns the bounded context used for a single cross-pod
+// control request. The caller must always call the returned cancel func.
+//
+// The bound is internal on purpose: plumbing the HTTP request's own context
+// through would change the public signatures of CancelTask / SendAnswer /
+// SendPermissionResponse, which a large number of call sites and tests depend
+// on staying as they are.
+func relayContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), controlRelayTimeout)
+}
+
+// cancelTaskLocal only checks this pod's own state. It's what
+// ControlLocalHandler exposes to NATSControlRelay's inbound handler, kept
+// separate from CancelTask so that handler can never recurse back out over
+// the relay when this pod turns out not to own the task.
+func (r *Runner) cancelTaskLocal(taskID string) error {
 	r.cancelMu.Lock()
 	cancel, ok := r.cancels[taskID]
 	r.cancelMu.Unlock()
 	if !ok {
-		return fmt.Errorf("task %s is not running", taskID)
+		return errNotOwned
 	}
 	cancel()
 	return nil
 }
 
-// SendAnswer delivers a user answer to a task that is waiting_for_input.
-// Returns an error if the task is not currently waiting.
-func (r *Runner) SendAnswer(taskID, answer string) error {
+// CancelTask cancels a running task, asking a different pod via the control
+// relay if this pod has no local record of it. Returns an error if no pod
+// owns the task.
+func (r *Runner) CancelTask(taskID string) error {
+	if err := r.cancelTaskLocal(taskID); err != nil {
+		if errors.Is(err, errNotOwned) {
+			ctx, cancel := relayContext()
+			defer cancel()
+			return r.relay.RequestCancel(ctx, taskID)
+		}
+		return err
+	}
+	return nil
+}
+
+// sendAnswerLocal only checks this pod's own state; see cancelTaskLocal's
+// doc comment for why this is kept separate from SendAnswer.
+func (r *Runner) sendAnswerLocal(taskID, answer string) error {
 	r.answerMu.Lock()
 	ch, ok := r.answers[taskID]
 	r.answerMu.Unlock()
 	if !ok {
-		return fmt.Errorf("task %s is not waiting for input", taskID)
+		return errNotOwned
 	}
 	select {
 	case ch <- answer:
@@ -131,15 +191,33 @@ func (r *Runner) SendAnswer(taskID, answer string) error {
 	}
 }
 
-// SendPermissionResponse delivers a user's allow/deny decision to a task
-// that is currently paused asking whether a tool may run. Returns an error
-// if the task is not currently waiting on a permission decision.
-func (r *Runner) SendPermissionResponse(taskID string, allow bool) error {
+// SendAnswer delivers a user answer to a task that is waiting_for_input,
+// asking a different pod via the control relay if this pod has no local
+// record of it. Returns an error if no pod is waiting for input on this task.
+func (r *Runner) SendAnswer(taskID, answer string) error {
+	if err := r.sendAnswerLocal(taskID, answer); err != nil {
+		if errors.Is(err, errNotOwned) {
+			ctx, cancel := relayContext()
+			defer cancel()
+			if relayErr := r.relay.RequestAnswer(ctx, taskID, answer); relayErr != nil {
+				return fmt.Errorf("task %s is not waiting for input", taskID)
+			}
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// sendPermissionResponseLocal only checks this pod's own state; see
+// cancelTaskLocal's doc comment for why this is kept separate from
+// SendPermissionResponse.
+func (r *Runner) sendPermissionResponseLocal(taskID string, allow bool) error {
 	r.permissionMu.Lock()
 	ch, ok := r.permissions[taskID]
 	r.permissionMu.Unlock()
 	if !ok {
-		return fmt.Errorf("task %s is not waiting for a permission decision", taskID)
+		return errNotOwned
 	}
 	select {
 	case ch <- allow:
@@ -147,6 +225,25 @@ func (r *Runner) SendPermissionResponse(taskID string, allow bool) error {
 	default:
 		return fmt.Errorf("task %s permission channel full", taskID)
 	}
+}
+
+// SendPermissionResponse delivers a user's allow/deny decision to a task
+// currently paused on a permission prompt, asking a different pod via the
+// control relay if this pod has no local record of it. Returns an error if
+// no pod is waiting on a permission decision for this task.
+func (r *Runner) SendPermissionResponse(taskID string, allow bool) error {
+	if err := r.sendPermissionResponseLocal(taskID, allow); err != nil {
+		if errors.Is(err, errNotOwned) {
+			ctx, cancel := relayContext()
+			defer cancel()
+			if relayErr := r.relay.RequestPermission(ctx, taskID, allow); relayErr != nil {
+				return fmt.Errorf("task %s is not waiting for a permission decision", taskID)
+			}
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // awaitPermission pauses the task on a "confirm this tool call" prompt: it
@@ -163,13 +260,13 @@ func (r *Runner) awaitPermission(ctx context.Context, taskID string, req *agent.
 	if err := r.store.UpdateTaskStatus(ctx, taskID, "waiting_for_input"); err != nil {
 		r.logger.Error("failed to update task status", "task_id", taskID, "status", "waiting_for_input", "err", err)
 	}
-	if err := r.store.UpdateTaskPendingQuestion(ctx, taskID, fmt.Sprintf("Approve %s: %s", req.ToolName, preview)); err != nil {
+	if err := r.store.UpdateTaskPendingQuestion(ctx, taskID, FormatPermissionPrompt(req.ToolName, preview), db.PendingKindPermission); err != nil {
 		r.logger.Error("failed to update task pending question", "task_id", taskID, "err", err)
 	}
 	r.hub.Publish(taskID, ServerEvent{Type: "permission_request", Tool: req.ToolName, Text: preview})
 
 	defer func() {
-		if err := r.store.UpdateTaskPendingQuestion(ctx, taskID, ""); err != nil {
+		if err := r.store.UpdateTaskPendingQuestion(ctx, taskID, "", ""); err != nil {
 			r.logger.Error("failed to clear task pending question", "task_id", taskID, "err", err)
 		}
 		if err := r.store.UpdateTaskStatus(ctx, taskID, "running"); err != nil {
@@ -187,6 +284,29 @@ func (r *Runner) awaitPermission(ctx context.Context, taskID string, req *agent.
 	case <-ctx.Done():
 		return false
 	}
+}
+
+// FormatPermissionPrompt renders the pending-question text stored for a task
+// paused on a tool-permission prompt. ParsePermissionPrompt is its inverse;
+// the two must stay in step, which is why they live side by side. The format
+// is also what the web client's own "approve tool call" rendering expects.
+func FormatPermissionPrompt(tool, preview string) string {
+	return fmt.Sprintf("Approve %s: %s", tool, preview)
+}
+
+// ParsePermissionPrompt recovers the tool name and input preview from text
+// produced by FormatPermissionPrompt. On anything it can't split it returns an
+// empty tool and the input unchanged, so a client still sees the raw prompt.
+func ParsePermissionPrompt(s string) (tool, preview string) {
+	rest, ok := strings.CutPrefix(s, "Approve ")
+	if !ok {
+		return "", s
+	}
+	tool, preview, ok = strings.Cut(rest, ": ")
+	if !ok {
+		return "", s
+	}
+	return tool, preview
 }
 
 // previewToolInput renders a short human-readable preview of a tool call's
@@ -216,20 +336,119 @@ func NewRunner(hub *Hub, store db.Store, q queue.Queue, provider llm.Provider, c
 	if concurrency <= 0 {
 		concurrency = 10
 	}
+	semTimeout := time.Duration(cfg.Server.SemaphoreAcquireTimeout) * time.Second
+	if semTimeout <= 0 {
+		semTimeout = 5 * time.Minute
+	}
 	return &Runner{
-		hub:         hub,
-		store:       store,
-		queue:       q,
-		provider:    provider,
-		cfg:         cfg,
-		sem:         make(chan struct{}, concurrency),
-		logger:      logger,
-		answers:     make(map[string]chan string),
-		permissions: make(map[string]chan bool),
-		cancels:     make(map[string]context.CancelFunc),
-		userSems:    make(map[string]chan struct{}),
+		hub:              hub,
+		store:            store,
+		queue:            q,
+		provider:         provider,
+		cfg:              cfg,
+		sem:              make(chan struct{}, concurrency),
+		logger:           logger,
+		relay:            noopControlRelay{},
+		semaphoreTimeout: semTimeout,
+		answers:          make(map[string]chan string),
+		permissions:      make(map[string]chan bool),
+		cancels:          make(map[string]context.CancelFunc),
+		userSems:         make(map[string]chan struct{}),
+		userSemLastUsed:  make(map[string]time.Time),
 	}
 }
+
+// ConcurrencyUtilization reports how full the global LLM concurrency
+// semaphore currently is: used is the number of slots currently held,
+// capacity is the total configured slots (cfg.Server.LLMConcurrency).
+// Reading len/cap on a channel is safe for concurrent use without locking.
+func (r *Runner) ConcurrencyUtilization() (used, capacity int) {
+	return len(r.sem), cap(r.sem)
+}
+
+// userSemIdleThreshold is how long a per-user semaphore entry can sit with
+// no dispatch activity before sweepIdleUserSemaphores reaps it. An hour is
+// comfortably longer than any realistic gap between a single user's tasks,
+// while still bounding how long Runner.userSems holds an entry for a user
+// who submitted exactly once and never came back — the map would otherwise
+// grow for as long as the process runs.
+const userSemIdleThreshold = time.Hour
+
+// userSemSweepInterval controls how often StartUserSemaphoreSweeper checks
+// for idle per-user semaphore entries. Independent of userSemIdleThreshold
+// (the age at which an entry qualifies) — this just bounds how promptly a
+// newly-idle entry gets noticed.
+var userSemSweepInterval = 10 * time.Minute
+
+// sweepIdleUserSemaphores removes userSems/userSemLastUsed entries for
+// users with no dispatch activity in the last userSemIdleThreshold relative
+// to now, and returns how many it removed.
+//
+// It only ever removes an entry whose channel is currently empty (len ==
+// 0) — one with a task actively holding a slot right now is left alone
+// regardless of how old its timestamp looks (defense in depth; in practice
+// the timestamp is refreshed at the start of every dispatch attempt for
+// that user, in the same locked section as the lookup/create, so an
+// in-use entry's timestamp is always recent — see run()'s per-user
+// semaphore section).
+//
+// Safe against a task starting for this user concurrently with a sweep:
+// the lookup-or-create-and-stamp sequence in run() and this function's
+// read-and-delete both hold r.userSemMu, so they can never interleave.
+// Deleting a map entry a goroutine still holds a Go channel reference to is
+// safe — channels are safe to abandon, so that goroutine's own acquire/
+// release against its captured channel keeps working unaffected. A new
+// task for that user simply creates a fresh entry on its next dispatch.
+func (r *Runner) sweepIdleUserSemaphores(now time.Time) (removed int) {
+	r.userSemMu.Lock()
+	defer r.userSemMu.Unlock()
+	for userID, lastUsed := range r.userSemLastUsed {
+		if now.Sub(lastUsed) < userSemIdleThreshold {
+			continue
+		}
+		if ch, ok := r.userSems[userID]; ok && len(ch) > 0 {
+			continue // a task currently holds a slot; leave this entry alone
+		}
+		delete(r.userSems, userID)
+		delete(r.userSemLastUsed, userID)
+		removed++
+	}
+	return removed
+}
+
+// StartUserSemaphoreSweeper periodically removes per-user semaphore entries
+// for users idle longer than userSemIdleThreshold, so Runner.userSems does
+// not grow without bound across the lifetime of a long-running process.
+// Runs until ctx is cancelled — call in a goroutine, tied to the same
+// top-level shutdown ctx as StartQueue's pop loop(s) (see
+// cmd/server/main.go), the same pattern used there for
+// runStaleTaskReconciler.
+func (r *Runner) StartUserSemaphoreSweeper(ctx context.Context) {
+	ticker := time.NewTicker(userSemSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if n := r.sweepIdleUserSemaphores(time.Now()); n > 0 {
+				r.logger.Info("swept idle per-user semaphore entries", "count", n)
+			}
+		}
+	}
+}
+
+// SetControlRelay installs a cross-pod control relay (see ControlRelay).
+// Call once at startup, before any tasks are dispatched.
+func (r *Runner) SetControlRelay(relay ControlRelay) {
+	r.relay = relay
+}
+
+// Compile-time check that Runner still satisfies ControlLocalHandler, so a
+// future change to sendAnswerLocal/sendPermissionResponseLocal/cancelTaskLocal
+// that breaks the contract NATSControlRelay depends on fails the build
+// instead of failing silently at runtime.
+var _ ControlLocalHandler = (*Runner)(nil)
 
 // Start blocks, continuously pulling from the Runner's default queue.
 // Run in a goroutine.
@@ -319,26 +538,50 @@ func (r *Runner) run(ctx context.Context, item queue.Item, delivery queue.Delive
 		}
 	}()
 
-	// Enforce per-user concurrency limit.
+	// Enforce per-user concurrency limit. Bounded by r.semaphoreTimeout: with
+	// no timeout branch here, a user whose per-user slots are all busy would
+	// block this goroutine (and its NATS delivery heartbeat) forever — and
+	// since the per-task context.CancelFunc isn't registered in r.cancels
+	// until after this section, Shutdown's grace-period force-cancel can't
+	// even reach a task stuck here to unblock it.
 	if limit := r.cfg.Server.PerUserConcurrency; limit > 0 {
 		r.userSemMu.Lock()
 		if _, ok := r.userSems[item.UserID]; !ok {
 			r.userSems[item.UserID] = make(chan struct{}, limit)
 		}
 		userSem := r.userSems[item.UserID]
+		// Stamp "last used" in the same critical section as the lookup/
+		// create above — not after the select below acquires a slot — so
+		// sweepIdleUserSemaphores (also gated on r.userSemMu) can never see
+		// a stale timestamp for an entry a dispatch is actively in the
+		// middle of touching. Both the read (sweep) and this write hold the
+		// same lock, and this write always happens-before the corresponding
+		// channel is handed to a real task below, so a sweep can only ever
+		// reap an entry with no dispatch activity at all in the idle
+		// window — never one merely between "looked up" and "acquired".
+		r.userSemLastUsed[item.UserID] = time.Now()
 		r.userSemMu.Unlock()
 		select {
 		case userSem <- struct{}{}:
 		case <-ctx.Done():
 			return
+		case <-time.After(r.semaphoreTimeout):
+			r.logger.Warn("timed out waiting for per-user LLM concurrency slot", "task_id", item.TaskID, "user_id", item.UserID, "timeout", r.semaphoreTimeout)
+			r.fail(ctx, item.TaskID, "server at capacity: timed out waiting for an available per-user execution slot, try again later", delivery)
+			return
 		}
 		defer func() { <-userSem }()
 	}
 
-	// Acquire global semaphore.
+	// Acquire global semaphore. Bounded for the same reason as the per-user
+	// wait above.
 	select {
 	case r.sem <- struct{}{}:
 	case <-ctx.Done():
+		return
+	case <-time.After(r.semaphoreTimeout):
+		r.logger.Warn("timed out waiting for global LLM concurrency slot", "task_id", item.TaskID, "timeout", r.semaphoreTimeout)
+		r.fail(ctx, item.TaskID, "server at capacity: timed out waiting for an available LLM concurrency slot, try again later", delivery)
 		return
 	}
 	defer func() { <-r.sem }()
@@ -392,6 +635,14 @@ func (r *Runner) run(ctx context.Context, item queue.Item, delivery queue.Delive
 	}()
 
 	startedAt := time.Now()
+
+	// Claim the task's event stream for this pod before publishing anything
+	// for it. This is what tells Hub.ServeSSE that this pod's local channel
+	// is the authoritative source for the task — on any other pod (including
+	// the one that merely accepted the submission and created a channel for
+	// it) the stream must read from the cross-pod relay instead. Every path
+	// out of run() from here on ends in hub.Close, which releases the claim.
+	r.hub.Claim(item.TaskID)
 
 	// Mark running.
 	if err := r.store.UpdateTaskStatus(ctx, item.TaskID, "running"); err != nil {
@@ -471,14 +722,14 @@ func (r *Runner) run(ctx context.Context, item queue.Item, delivery queue.Delive
 		if err := r.store.UpdateTaskStatus(ctx, item.TaskID, "waiting_for_input"); err != nil {
 			r.logger.Error("failed to update task status", "task_id", item.TaskID, "status", "waiting_for_input", "err", err)
 		}
-		if err := r.store.UpdateTaskPendingQuestion(ctx, item.TaskID, question); err != nil {
+		if err := r.store.UpdateTaskPendingQuestion(ctx, item.TaskID, question, db.PendingKindQuestion); err != nil {
 			r.logger.Error("failed to update task pending question", "task_id", item.TaskID, "err", err)
 		}
 		r.hub.Publish(item.TaskID, ServerEvent{Type: "waiting_for_input", Text: question})
 
 		select {
 		case answer := <-answerCh:
-			if err := r.store.UpdateTaskPendingQuestion(ctx, item.TaskID, ""); err != nil {
+			if err := r.store.UpdateTaskPendingQuestion(ctx, item.TaskID, "", ""); err != nil {
 				r.logger.Error("failed to clear task pending question", "task_id", item.TaskID, "err", err)
 			}
 			if err := r.store.UpdateTaskStatus(ctx, item.TaskID, "running"); err != nil {
@@ -503,6 +754,7 @@ func (r *Runner) run(ctx context.Context, item queue.Item, delivery queue.Delive
 	eventCh := ag.RunTurn(taskCtx, prompt)
 
 	var totalIn, totalOut int
+	var totalCacheRead, totalCacheCreated int
 	var prURL string
 	var outputBuf strings.Builder
 	var taskErr error
@@ -540,6 +792,8 @@ func (r *Runner) run(ctx context.Context, item queue.Item, delivery queue.Delive
 			if ev.Usage != nil {
 				totalIn += ev.Usage.InputTokens
 				totalOut += ev.Usage.OutputTokens
+				totalCacheRead += ev.Usage.CacheRead
+				totalCacheCreated += ev.Usage.CacheCreated
 			}
 
 		case agent.TurnEventPermission:
@@ -557,6 +811,8 @@ func (r *Runner) run(ctx context.Context, item queue.Item, delivery queue.Delive
 	metricTaskDuration.Observe(time.Since(startedAt).Seconds())
 	metricLLMInputTokens.Add(float64(totalIn))
 	metricLLMOutputTokens.Add(float64(totalOut))
+	metricLLMCacheReadTokens.Add(float64(totalCacheRead))
+	metricLLMCacheCreatedTokens.Add(float64(totalCacheCreated))
 
 	// If the event loop exited without a taskErr but the context was cancelled,
 	// treat it as cancellation (happens when executeSingleTool returns nil early).
@@ -589,12 +845,66 @@ func (r *Runner) run(ctx context.Context, item queue.Item, delivery queue.Delive
 	r.hub.Close(item.TaskID)
 }
 
+// taskOutcomeWindowSize bounds how many of the most recent task outcomes
+// TaskErrorRate considers. A rolling window rather than a lifetime ratio, so
+// /healthz reflects "is this happening right now" — a lifetime ratio would
+// stay permanently elevated after a single bad hour, long after recovery.
+const taskOutcomeWindowSize = 100
+
+// taskOutcomeWindow is a small fixed-capacity ring buffer of the most
+// recent task terminal outcomes (true = failed, false = done/cancelled),
+// guarded by its own mutex. Its zero value is ready to use. Backs
+// Runner.TaskErrorRate.
+type taskOutcomeWindow struct {
+	mu      sync.Mutex
+	entries [taskOutcomeWindowSize]bool
+	count   int // number of entries written so far, caps at len(entries)
+	next    int // ring cursor: index the next record() writes to
+}
+
+func (w *taskOutcomeWindow) record(failed bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.entries[w.next] = failed
+	w.next = (w.next + 1) % len(w.entries)
+	if w.count < len(w.entries) {
+		w.count++
+	}
+}
+
+func (w *taskOutcomeWindow) snapshot() (failed, total int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	total = w.count
+	for i := 0; i < w.count; i++ {
+		if w.entries[i] {
+			failed++
+		}
+	}
+	return failed, total
+}
+
+// TaskErrorRate returns the fraction of "failed" outcomes among the most
+// recent taskOutcomeWindowSize completed tasks, along with the raw
+// failed/total counts backing that fraction. A user-initiated "cancelled"
+// outcome counts toward total but not failed — it isn't a signal of server
+// health the way an actual task failure is. total is 0 (and rate 0) until
+// at least one task has completed since process start.
+func (r *Runner) TaskErrorRate() (rate float64, failed, total int) {
+	failed, total = r.outcomes.snapshot()
+	if total == 0 {
+		return 0, 0, 0
+	}
+	return float64(failed) / float64(total), failed, total
+}
+
 // persistFinalResult writes a task's terminal outcome to the store and only
 // then acks the queue delivery — a failed write naks instead, so the queue
 // redelivers and the whole task is retried rather than silently lost. This is
 // the "ack only after persistence" invariant for the durable queue.
 func (r *Runner) persistFinalResult(ctx context.Context, delivery queue.Delivery, taskID, status, prURL, errMsg, output string, inputTokens, outputTokens int) {
 	metricTasksCompleted.WithLabelValues(status).Inc()
+	r.outcomes.record(status == "failed")
 	if err := r.store.UpdateTaskResult(ctx, taskID, status, prURL, errMsg, output, inputTokens, outputTokens); err != nil {
 		r.logger.Error("failed to update task result", "task_id", taskID, "status", status, "err", err)
 		if nakErr := delivery.Nak(); nakErr != nil {
@@ -650,13 +960,44 @@ func (r *Runner) wireAgent(ctx context.Context, item queue.Item) (*agent.Agent, 
 	toolReg.Register(&tools.AskUserTool{})
 	toolReg.Register(tools.NewAgentTool(r.buildSubAgentRunner(cwd)))
 
+	// sandboxExecutor is nil (host-exec fallback) unless sandbox_enabled is
+	// set — see internal/sandbox and docs/SANDBOX.md. Defaulting to nil keeps
+	// ValidateSkill/SecurityScanSkill behavior byte-for-byte unchanged for
+	// anyone not opting into sandboxing. sandbox_backend selects which
+	// Executor implementation backs it; anything other than "kubernetes"
+	// (including empty, the pre-existing default) keeps the original
+	// Docker-only behavior.
+	var sandboxExecutor sandbox.Executor
+	if r.cfg.Server.SandboxEnabled {
+		switch r.cfg.Server.SandboxBackend {
+		case "kubernetes":
+			k8sExecutor, err := sandbox.NewK8sJobExecutor(
+				r.cfg.Server.SandboxKubeconfigPath,
+				r.cfg.Server.SandboxKubeNamespace,
+				r.cfg.Server.SandboxImage,
+				r.cfg.Server.SandboxKubeMemory,
+				r.cfg.Server.SandboxKubeCPUs,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("sandbox: build kubernetes executor: %w", err)
+			}
+			sandboxExecutor = k8sExecutor
+		default:
+			sandboxExecutor = sandbox.NewDockerExecutor(
+				r.cfg.Server.SandboxImage,
+				r.cfg.Server.SandboxMemory,
+				r.cfg.Server.SandboxCPUs,
+			)
+		}
+	}
+
 	skillReg := skills.NewRegistry()
 	skillReg.Register(skills.NewRepoScanSkill(r.store))
 	skillReg.Register(skills.NewClarifierSkill(r.provider, model))
 	skillReg.Register(skills.NewGenerateSkill(cwd))
-	skillReg.Register(&skills.ValidateSkill{})
+	skillReg.Register(skills.NewValidateSkill(sandboxExecutor))
 	skillReg.Register(&skills.CreatePRSkill{})
-	skillReg.Register(&skills.SecurityScanSkill{})
+	skillReg.Register(skills.NewSecurityScanSkill(sandboxExecutor))
 	skillReg.Register(&skills.JiraFetchSkill{})
 	skillReg.Register(&skills.DriftDetectSkill{})
 

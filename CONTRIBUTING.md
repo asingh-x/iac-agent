@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Go 1.25+
+- Go 1.26+
 - Node 20+
 - `terraform` CLI (for validate skill tests)
 - `checkov` (for security scan skill tests)

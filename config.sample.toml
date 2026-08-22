@@ -34,6 +34,57 @@ per_user_concurrency = 3
 # Default: 500
 queue_buffer = 500
 
+# Run terraform/tflint/checkov (invoked by the Validate and SecurityScan
+# skills) inside a locked-down Docker container instead of directly on the
+# host. See docs/SANDBOX.md. Requires a local Docker daemon — pulls the
+# published sandbox image automatically, no local build required (run
+# `make sandbox-build` instead if you want a local dev-loop build).
+# Override with env var: TF_AGENT_SANDBOX_ENABLED=true
+# Default: false (unchanged host-exec behavior — no Docker dependency)
+sandbox_enabled = false
+
+# Image used by the sandbox. Defaults to the published, publicly-pullable
+# image (built from docker/sandbox/Dockerfile, pushed multi-arch
+# amd64+arm64) — override to a local tag (e.g. after `make sandbox-build`)
+# for local dev iteration, or to your own registry/image for the
+# Kubernetes backend if your cluster can't reach ghcr.io.
+# Override with env var: TF_AGENT_SANDBOX_IMAGE=iac-agent-sandbox:latest
+# Default: "ghcr.io/asingh-x/iac-agent/sandbox:latest"
+# sandbox_image = "ghcr.io/asingh-x/iac-agent/sandbox:latest"
+
+# Resource limits applied to each sandbox container (Docker --memory/--cpus).
+# Default: "512m" / "1"
+# sandbox_memory = "512m"
+# sandbox_cpus = "1"
+
+# Which sandbox.Executor backend sandbox_enabled wires up: "docker" (local
+# Docker daemon, single node) or "kubernetes" (a real cluster, multi-node —
+# see docs/SANDBOX.md for what this needs and what was verified).
+# Override with env var: TF_AGENT_SANDBOX_BACKEND=kubernetes
+# Default: "docker"
+# sandbox_backend = "docker"
+
+# Kubernetes backend only. Namespace K8sJobExecutor creates its Jobs in —
+# must already exist; K8sJobExecutor never creates or modifies namespaces
+# itself. Override with env var: TF_AGENT_SANDBOX_KUBE_NAMESPACE=my-namespace
+# Default: "iac-agent-sandbox"
+# sandbox_kube_namespace = "iac-agent-sandbox"
+
+# Kubernetes backend only. Path to a kubeconfig file. Leave unset to use the
+# standard client-go resolution order ($KUBECONFIG, then ~/.kube/config,
+# then in-cluster config when running inside a pod).
+# Override with env var: TF_AGENT_SANDBOX_KUBECONFIG_PATH=/path/to/kubeconfig
+# sandbox_kubeconfig_path = ""
+
+# Kubernetes backend only. Resource requests/limits per sandbox pod, using
+# Kubernetes resource.Quantity syntax — NOT the same syntax as
+# sandbox_memory/sandbox_cpus above (Docker's "512m" means megabytes;
+# Kubernetes' bare "m" suffix means milli, so the Kubernetes fields use
+# "512Mi" instead).
+# Default: "512Mi" / "1"
+# sandbox_kube_memory = "512Mi"
+# sandbox_kube_cpus = "1"
+
 
 # ----------------------------------------------------------------------------
 # LLM provider

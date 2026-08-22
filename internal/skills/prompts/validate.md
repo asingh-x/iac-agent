@@ -1,6 +1,10 @@
 ## Terraform Validator
 
-Run validation on generated Terraform files. Interpret results and act:
+Run validation on generated Terraform files. Output is a structured summary
+(one line per finding: `severity: file:line: summary — detail`), not raw
+tool JSON — use the file:line each finding reports to locate and fix the
+exact HCL, rather than re-deriving location from a JSON blob. Interpret
+results and act:
 
 - `terraform validate` fails with syntax/reference errors → fix the HCL and re-run validate before proceeding
 - `tflint` errors → fix them; tflint warnings are advisory, note them but continue

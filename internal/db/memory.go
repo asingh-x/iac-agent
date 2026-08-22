@@ -216,11 +216,12 @@ func (s *memStore) UpdateTaskStatus(_ context.Context, id, status string) error 
 	return nil
 }
 
-func (s *memStore) UpdateTaskPendingQuestion(_ context.Context, id, question string) error {
+func (s *memStore) UpdateTaskPendingQuestion(_ context.Context, id, question, kind string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if t, ok := s.tasks[id]; ok {
 		t.PendingQuestion = question
+		t.PendingKind = kind
 	}
 	return nil
 }
@@ -278,6 +279,24 @@ func (s *memStore) MarkStaleTasksFailed(_ context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (s *memStore) FailTasksOlderThan(_ context.Context, maxAge time.Duration, errMsg string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cutoff := time.Now().Add(-maxAge)
+	n := 0
+	for _, t := range s.tasks {
+		if (t.Status == "running" || t.Status == "queued" || t.Status == "waiting_for_input") &&
+			t.CompletedAt == nil && t.CreatedAt.Before(cutoff) {
+			t.Status = "failed"
+			t.ErrorMsg = errMsg
+			now := time.Now()
+			t.CompletedAt = &now
+			n++
+		}
+	}
+	return n, nil
 }
 
 // --- User settings ---

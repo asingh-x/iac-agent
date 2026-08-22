@@ -44,12 +44,28 @@ const DefaultNATSMaxMsgs = 5000
 // limit. A burst on one named queue can therefore consume the whole budget
 // and cause Push to fail for other named queues too. That's an accepted
 // limitation of the current shared-stream design, not a bug.
+//
+// Uses the production default AckWait (natsAckWait, 5 minutes). Use
+// NewNATSQueueWithAckWait to override it (e.g. in tests that need to prove
+// redelivery without waiting 5 minutes).
 func NewNATSQueue(url, name string, maxMsgs int) (*NATSQueue, error) {
+	return NewNATSQueueWithAckWait(url, name, maxMsgs, natsAckWait)
+}
+
+// NewNATSQueueWithAckWait is NewNATSQueue with the pull consumer's AckWait
+// overridable, so a test can use a short wait (e.g. 2-3 seconds) to prove
+// redelivery-on-abandoned-delivery without the production 5-minute default.
+// NewNATSQueue is a thin wrapper around this with ackWait fixed at
+// natsAckWait — its signature and behavior are unchanged.
+func NewNATSQueueWithAckWait(url, name string, maxMsgs int, ackWait time.Duration) (*NATSQueue, error) {
 	if name == "" {
 		name = "default"
 	}
 	if maxMsgs <= 0 {
 		maxMsgs = DefaultNATSMaxMsgs
+	}
+	if ackWait <= 0 {
+		ackWait = natsAckWait
 	}
 	nc, err := nats.Connect(url,
 		nats.RetryOnFailedConnect(true),
@@ -107,7 +123,7 @@ func NewNATSQueue(url, name string, maxMsgs int) (*NATSQueue, error) {
 	// Per-name pull consumer — durable so it survives reconnects.
 	sub, err := js.PullSubscribe(subject, durable,
 		nats.BindStream(natsStream),
-		nats.AckWait(natsAckWait),
+		nats.AckWait(ackWait),
 		nats.MaxDeliver(5),
 	)
 	if err != nil {
@@ -188,9 +204,20 @@ func (q *NATSQueue) Len() int {
 	return int(info.State.Msgs)
 }
 
-// Close drains and closes the NATS connection.
+// Close closes the NATS connection, without unsubscribing first.
+//
+// This deliberately skips *nats.Subscription.Unsubscribe(): per its own
+// doc comment, the nats.go client library auto-deletes a durable JetStream
+// consumer on Unsubscribe/Drain if this subscription is the one that
+// created it — i.e. whichever pod happens to be first to start against a
+// given queue name. In a multi-replica deployment every other pod binds to
+// that same shared durable consumer (that's how the work queue fans out
+// across workers), so that pod's later *graceful* shutdown would delete the
+// consumer out from under every other pod still using it, and a freshly
+// recreated consumer can hand out an in-flight message to a second pod
+// concurrently with the first. Simply closing the connection lets the
+// durable consumer do what "durable" means: survive a client disconnect.
 func (q *NATSQueue) Close() error {
-	_ = q.sub.Unsubscribe()
 	q.nc.Close()
 	return nil
 }

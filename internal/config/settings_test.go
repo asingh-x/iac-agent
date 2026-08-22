@@ -46,6 +46,25 @@ func TestDefaults_NATSMaxMsgsIsSanePositiveDefault(t *testing.T) {
 	}
 }
 
+func TestDefaults_StaleTaskMaxAgeIsWellAboveMaxTaskDuration(t *testing.T) {
+	// StaleTaskMaxAge (used by the age-based reconciliation backstop, see
+	// cmd/server's runStaleTaskReconciler / db.Store.FailTasksOlderThan) must
+	// default to comfortably more than Agent.MaxTaskDuration: that field
+	// bounds a task that IS actively running; this one is a last-resort net
+	// for a task that never even got a fair shot at running (e.g. NATS
+	// delivery abandoned/redelivered until MaxDeliver is exhausted). If this
+	// ever regressed to being close to or smaller than MaxTaskDuration, the
+	// reconciler could fail a task that is still well within its normal
+	// execution budget.
+	cfg := Defaults()
+	if cfg.Server.StaleTaskMaxAge <= 0 {
+		t.Fatalf("Server.StaleTaskMaxAge = %d, want a positive default", cfg.Server.StaleTaskMaxAge)
+	}
+	if cfg.Server.StaleTaskMaxAge < 3*cfg.Agent.MaxTaskDuration {
+		t.Errorf("Server.StaleTaskMaxAge = %d is not comfortably larger than Agent.MaxTaskDuration = %d (want at least 3x)", cfg.Server.StaleTaskMaxAge, cfg.Agent.MaxTaskDuration)
+	}
+}
+
 func TestDefaults_FallbackStaysAuto(t *testing.T) {
 	// "default" is the fallback for every skill (repo_scan, generate_terraform,
 	// CreatePR, ...) and non-file tool (ask_user, agent, task, web_fetch,
@@ -55,5 +74,36 @@ func TestDefaults_FallbackStaysAuto(t *testing.T) {
 	cfg := Defaults()
 	if cfg.Permissions.Default != "auto" {
 		t.Errorf("Permissions.Default = %q, want auto", cfg.Permissions.Default)
+	}
+}
+
+// TestDefaults_SandboxDisabledByDefault guards against ever flipping the
+// sandbox on by default — it must stay opt-in so `make run`/local dev works
+// unchanged for anyone without Docker running (see docs/SANDBOX.md).
+func TestDefaults_SandboxDisabledByDefault(t *testing.T) {
+	cfg := Defaults()
+	if cfg.Server.SandboxEnabled {
+		t.Error("SandboxEnabled must default to false")
+	}
+	if cfg.Server.SandboxImage == "" {
+		t.Error("SandboxImage should have a non-empty default")
+	}
+	if cfg.Server.SandboxMemory == "" {
+		t.Error("SandboxMemory should have a non-empty default")
+	}
+	if cfg.Server.SandboxCPUs == "" {
+		t.Error("SandboxCPUs should have a non-empty default")
+	}
+	if cfg.Server.SandboxBackend != "docker" {
+		t.Errorf("SandboxBackend = %q, want default %q", cfg.Server.SandboxBackend, "docker")
+	}
+	if cfg.Server.SandboxKubeNamespace == "" {
+		t.Error("SandboxKubeNamespace should have a non-empty default")
+	}
+	if cfg.Server.SandboxKubeMemory == "" {
+		t.Error("SandboxKubeMemory should have a non-empty default")
+	}
+	if cfg.Server.SandboxKubeCPUs == "" {
+		t.Error("SandboxKubeCPUs should have a non-empty default")
 	}
 }

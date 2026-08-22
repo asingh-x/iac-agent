@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -106,6 +107,7 @@ func (s *Server) Handler() http.Handler {
 	authed.HandleFunc("POST /v1/tasks", s.handleSubmitTask)
 	authed.HandleFunc("GET /v1/tasks", s.handleListTasks)
 	authed.HandleFunc("GET /v1/tasks/{id}", s.handleGetTask)
+	authed.HandleFunc("GET /v1/tasks/{id}/output", s.handleGetTaskOutput)
 	authed.HandleFunc("GET /v1/tasks/{id}/stream", s.handleStreamTask)
 	authed.HandleFunc("POST /v1/tasks/{id}/answer", s.handleAnswerTask)
 	authed.HandleFunc("POST /v1/tasks/{id}/permission", s.handlePermissionResponse)
@@ -177,11 +179,37 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	depths := s.queueDepths()
 
+	// LLM concurrency saturation and recent task error rate: observability
+	// only — neither factors into healthy/code above. A saturated queue or
+	// a nonzero error rate can just as easily mean "the upstream LLM API is
+	// having a bad day," which is a different signal than "this process
+	// itself is broken" (api_key/database/encryption_key, checked above),
+	// and flipping /healthz unhealthy for it would make an autoscaler or
+	// orchestrator kill/recycle pods that are, structurally, fine.
+	llmUsed, llmCapacity := 0, 0
+	var errRate float64
+	var errFailed, errTotal int
+	if s.runner != nil {
+		llmUsed, llmCapacity = s.runner.ConcurrencyUtilization()
+		errRate, errFailed, errTotal = s.runner.TaskErrorRate()
+	}
+	metricLLMConcurrencyUsed.Set(float64(llmUsed))
+	metricLLMConcurrencyCapacity.Set(float64(llmCapacity))
+
 	writeJSON(w, code, map[string]any{
 		"status":      status,
 		"checks":      checks,
 		"queue_len":   s.totalQueueLen(),
 		"queue_depth": depths,
+		"llm_concurrency": map[string]any{
+			"used":     llmUsed,
+			"capacity": llmCapacity,
+		},
+		"task_error_rate": map[string]any{
+			"rate":   errRate,
+			"failed": errFailed,
+			"total":  errTotal,
+		},
 	})
 }
 
@@ -283,6 +311,21 @@ func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Fail fast if the global LLM concurrency semaphore is already fully
+	// saturated, instead of accepting the task and letting it sit queued
+	// only to fail later once run() gives up waiting for a slot (see
+	// Runner.run's bounded semaphore wait). This is a best-effort admission
+	// check, not a reservation — capacity can change between this check and
+	// the task actually being dequeued — but it sheds load at the cheapest
+	// possible point for a client that can retry, the same way a full queue
+	// already does below.
+	if s.runner != nil {
+		if used, capacity := s.runner.ConcurrencyUtilization(); capacity > 0 && used >= capacity {
+			writeError(w, http.StatusServiceUnavailable, "server at capacity, try again later")
+			return
+		}
+	}
+
 	// Persist task
 	task, err := s.store.CreateTask(r.Context(), user.ID, inputType, inputText, outputType)
 	if err != nil {
@@ -350,6 +393,84 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.withCost(task))
+}
+
+// defaultTaskOutputLimit bounds how many bytes of a task's output
+// handleGetTaskOutput returns when the caller doesn't specify limit — large
+// enough to cover the overwhelming majority of task outputs in one call,
+// small enough that a client can't accidentally pull an unbounded blob (the
+// exact problem this endpoint exists to let a client avoid on the plain
+// GET /v1/tasks/{id} response).
+const defaultTaskOutputLimit = 100_000
+
+// handleGetTaskOutput returns a byte-offset slice of a task's stored output,
+// so a client can page through a large output instead of always receiving
+// the whole thing embedded in GET /v1/tasks/{id}. Same owner-or-admin
+// ownership check as the sibling task endpoints.
+//
+// offset/limit slice task.Output by byte offset, not rune/codepoint offset —
+// a slice boundary landing mid-UTF-8-rune is possible or the caller passes a
+// value from earlier that no longer means the same page (output only ever
+// grows for a still-running task) — the plain-string byte slicing this
+// implements is exactly what's asked for here, but a client display layer
+// should tolerate a stray partial rune at either edge.
+func (s *Server) handleGetTaskOutput(w http.ResponseWriter, r *http.Request) {
+	user := userFromContext(r.Context())
+	taskID := r.PathValue("id")
+
+	task, err := s.store.GetTask(r.Context(), taskID)
+	if err != nil || task == nil {
+		writeError(w, http.StatusNotFound, "task not found")
+		return
+	}
+	if task.UserID != user.ID && user.Role != "admin" {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+
+	offset := 0
+	if v := r.URL.Query().Get("offset"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			writeError(w, http.StatusBadRequest, "offset must be a non-negative integer")
+			return
+		}
+		offset = n
+	}
+
+	limit := defaultTaskOutputLimit
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			writeError(w, http.StatusBadRequest, "limit must be a positive integer")
+			return
+		}
+		limit = n
+	}
+
+	total := len(task.Output)
+	start := offset
+	if start > total {
+		start = total
+	}
+	// Computed as "end = total unless limit is small enough that start+limit
+	// can't overflow" rather than the more obvious `end := start + limit; if
+	// end > total { end = total }` — with limit near math.MaxInt64 (an
+	// attacker-controlled query param), that addition overflows to a large
+	// negative number, which is never ">total" and slips past the clamp,
+	// causing a slice-bounds panic on task.Output[start:end] below.
+	end := total
+	if limit < total-start {
+		end = start + limit
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"task_id":      taskID,
+		"offset":       offset,
+		"limit":        limit,
+		"total_length": total,
+		"output":       task.Output[start:end],
+	})
 }
 
 func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
@@ -445,6 +566,43 @@ func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
 }
 
+// InitialSnapshotEvent turns a task's current Postgres row into the SSE
+// event ServeSSE should send before anything else. This is what makes a pod
+// that isn't executing the task still "have the info" the instant a client
+// connects to it — regardless of whether the cross-pod event relay is even
+// configured — by reflecting whatever state is already durably persisted.
+//
+// Exported because it is also the body of Hub's relay-path status backstop,
+// wired from package main (see Hub.SetStatusCheck).
+//
+// Known, accepted race: the row is read at connect time and can already be
+// stale by the time the event reaches the client (e.g. the user's answer
+// landed a moment earlier, or the task just finished). The consequence is a
+// UX rough edge, not corruption — a client acting on a stale "waiting for
+// input" snapshot gets a normal 409 from the answer/permission endpoint, and
+// the live stream that follows immediately corrects the state.
+func InitialSnapshotEvent(task *db.Task) *ServerEvent {
+	switch task.Status {
+	case "done":
+		return &ServerEvent{Type: "done", PRUrl: task.PRUrl}
+	case "failed", "cancelled":
+		return &ServerEvent{Type: "error", Error: task.ErrorMsg}
+	case "waiting_for_input":
+		// The agent supports two kinds of pause, both persisted as status
+		// waiting_for_input: a free-text ask_user question, and a
+		// tool-permission prompt. PendingKind records which, so a client
+		// reconnecting (or landing on a different pod) mid-prompt learns
+		// whether to render a text box or approve/deny buttons.
+		if task.PendingKind == db.PendingKindPermission {
+			tool, preview := ParsePermissionPrompt(task.PendingQuestion)
+			return &ServerEvent{Type: "permission_request", Tool: tool, Text: preview}
+		}
+		return &ServerEvent{Type: "waiting_for_input", Text: task.PendingQuestion}
+	default: // "queued", "running"
+		return &ServerEvent{Type: "status", Status: task.Status}
+	}
+}
+
 func (s *Server) handleStreamTask(w http.ResponseWriter, r *http.Request) {
 	user := userFromContext(r.Context())
 	taskID := r.PathValue("id")
@@ -459,7 +617,7 @@ func (s *Server) handleStreamTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.hub.ServeSSE(w, r, taskID)
+	s.hub.ServeSSE(w, r, taskID, InitialSnapshotEvent(task))
 }
 
 // --- Admin ---

@@ -14,13 +14,15 @@ NATS_CONTAINER = tf-agent-nats
 NATS_PORT      = 4222
 NATS_MON_PORT  = 8222
 
+SANDBOX_IMAGE = iac-agent-sandbox:latest
+
 # ?= lets an environment variable (or command-line override) take precedence
 DB_URL   ?= postgres://$(PG_USER):$(PG_PASS)@localhost:$(PG_PORT)/$(PG_DB)?sslmode=disable
 NATS_URL ?= nats://localhost:$(NATS_PORT)
 export DB_URL
 export NATS_URL
 
-.PHONY: build build-server build-ui dev dev-ui run-server run test test-unit test-unit-v test-integration test-all lint vuln clean install tidy doctor infra infra-stop infra-status infra-clean
+.PHONY: build build-server build-ui dev dev-ui run-server run test test-unit test-unit-v test-integration test-all lint vuln clean install tidy doctor infra infra-stop infra-status infra-clean sandbox-build
 
 ## build — builds UI + server binary
 build: build-ui build-server
@@ -145,7 +147,13 @@ infra-clean:
 	@docker volume rm tf-agent-postgres-data 2>/dev/null || true
 	@echo "✓ Infra containers and volumes removed"
 
-# Doctor 
+## sandbox-build — build the terraform/tflint/checkov sandbox image used by
+## internal/sandbox.DockerExecutor when server.sandbox_enabled = true
+sandbox-build:
+	docker build -f docker/sandbox/Dockerfile -t $(SANDBOX_IMAGE) .
+	@echo "✓ built $(SANDBOX_IMAGE) — see docs/SANDBOX.md"
+
+# Doctor
 doctor:
 	@echo "=== tf-agent doctor ==="
 	@echo -n "Go:            "; go version
@@ -154,10 +162,11 @@ doctor:
 	@echo -n "ANTHROPIC_KEY: "; [ -n "$$ANTHROPIC_API_KEY" ] && echo "set" || echo "NOT SET"
 	@echo -n "AWS creds:     "; aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "not configured"
 	@echo -n "govulncheck:   "; which govulncheck 2>/dev/null || echo "not found (go install golang.org/x/vuln/cmd/govulncheck@latest)"
-	@echo -n "terraform:     "; which terraform 2>/dev/null || echo "not found"
-	@echo -n "tflint:        "; which tflint 2>/dev/null || echo "not found"
+	@echo -n "terraform:     "; which terraform 2>/dev/null || echo "not found (see https://developer.hashicorp.com/terraform/install)"
+	@echo -n "tflint:        "; which tflint 2>/dev/null || echo "not found (see https://github.com/terraform-linters/tflint#installation)"
 	@echo -n "checkov:       "; which checkov 2>/dev/null || echo "not found (pip install checkov)"
 	@echo -n "GITHUB_TOKEN:  "; [ -n "$$GITHUB_TOKEN" ] && echo "set" || echo "not set"
 	@echo -n "Postgres:      "; docker exec $(PG_CONTAINER) pg_isready -U $(PG_USER) 2>/dev/null && echo "running" || echo "not running (make infra)"
 	@echo -n "NATS:          "; docker inspect -f '{{.State.Status}}' $(NATS_CONTAINER) 2>/dev/null || echo "not running (make infra)"
+	@echo -n "sandbox image: "; docker image inspect $(SANDBOX_IMAGE) >/dev/null 2>&1 && echo "built locally ($(SANDBOX_IMAGE))" || echo "not built locally — fine, sandbox_enabled = true pulls the published image by default; run 'make sandbox-build' only if you want a local dev-loop build (see docs/SANDBOX.md)"
 	@echo "=== done ==="

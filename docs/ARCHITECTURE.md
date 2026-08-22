@@ -38,9 +38,106 @@ in-memory implementation (`internal/db/memory.go`) exists solely for unit
 tests and is never used in production. Schema changes are versioned SQL files
 under `internal/db/migrations/`, applied automatically and idempotently on
 every process start (`internal/db/migrate.go`) — see that package for the
-exact mechanism. `internal/queue` is in-memory by default; a NATS-backed queue
-is available for multi-instance deployments (`make infra` starts NATS +
-Postgres locally).
+exact mechanism. `internal/queue` is in-memory by default, which is safe only
+for a single-replica deployment. Any deployment running more than one pod
+replica **must** set `queue_driver=nats` (or `QUEUE_DRIVER=nats`): besides the
+task queue itself, SSE streaming (`internal/server/stream.go`) and the
+answer/permission/cancel control endpoints (`internal/server/task_runner.go`)
+are backed by per-process in-memory state and use NATS core pub/sub as a
+cross-pod relay (`internal/server/event_relay.go`,
+`internal/server/control_relay.go`) — configured automatically whenever
+`queue_driver=nats` is set, no separate flag needed. Task rows themselves
+were already Postgres-backed and pod-agnostic before this relay existed; this
+closes the remaining gap for the control-plane paths. (`make infra` starts
+NATS + Postgres locally.)
+
+The sequence this whole mechanism exists for — a client's request landing on a
+pod other than the one running its task:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant LB as Load Balancer
+    participant A as Pod A (owns the task)
+    participant B as Pod B
+    participant N as NATS (relay)
+
+    C->>LB: POST /v1/tasks
+    LB->>A: routed here
+    A->>A: pops it off the queue, starts running
+    C->>LB: GET /v1/tasks/{id}/stream
+    LB->>B: routed here — a different pod
+    B->>N: subscribe (Hub.ServeSSE relay fallback)
+    A->>N: publish events as they happen (Hub.Publish)
+    N->>B: forward events
+    B->>C: forward over SSE
+    C->>LB: POST /v1/tasks/{id}/answer
+    LB->>B: routed here again
+    B->>N: relay the answer (Runner.SendAnswer fallback)
+    N->>A: forward to the owning pod
+    A->>A: delivers the answer, resumes the task
+```
+
+Before this work, the SSE leg above returned a false "task not found" and the
+answer leg 409'd — both pods thought they were right. Two details of the
+cross-pod SSE path are worth knowing before changing it:
+
+- **A stream reads exactly one source.** `Hub.Publish` writes every event to
+  both this pod's local channel and the relay, so reading both would deliver
+  everything twice. `Hub.ServeSSE` therefore subscribes to the relay
+  immediately (nothing published during the decision window is lost — NATS
+  core pub/sub has no replay), then commits to either the local channel or the
+  relay and drops the other unread. The local channel is only authoritative
+  when this pod actually claimed the task (`Hub.Claim`, called by
+  `Runner.run`): a channel also exists on whichever pod merely *accepted* the
+  submission, and on that pod it stays empty forever. Because the relay's
+  channel is never closed, a relay-only stream also re-reads the task's row
+  periodically (`Hub.SetStatusCheck`) so it ends rather than heartbeating
+  forever if the terminal event never crosses (lost message, owning pod died).
+- **The connect-time snapshot is a point-in-time read.** `InitialSnapshotEvent`
+  renders the task's current row so a client landing on a non-owning pod sees
+  state immediately. `tasks.pending_kind` records *which* kind of pause a
+  `waiting_for_input` row represents (free-text `ask_user` question vs. tool
+  permission prompt), so a reconnecting client knows whether to render a text
+  box or approve/deny buttons. The snapshot can be marginally stale by the time
+  it reaches the client (e.g. the answer landed a moment earlier); that is an
+  accepted race — acting on a stale snapshot yields a normal 409, not
+  corruption, and the live stream immediately corrects the state.
+
+The NATS work queue itself needed one more fix for correctness under
+multiple replicas: every pod that binds to a given queue name shares one
+durable JetStream consumer (that's how work fans out across workers), and
+`nats.go`'s `Unsubscribe()` auto-deletes a durable consumer if the calling
+subscription is the one that created it. Whichever pod happened to start
+first against a queue name "owned" it in the library's eyes — its later
+*graceful* shutdown (a routine rolling restart, not just a crash) would have
+deleted the consumer out from under every other pod still using it, resetting
+in-flight delivery tracking and risking the same task running on two pods at
+once. `NATSQueue.Close()` no longer calls `Unsubscribe()` — it just closes
+the connection, which is all a durable consumer needs to survive a
+disconnect. A chaos test (`internal/queue/chaos_test.go`) pins this by
+proving an in-flight, unacked delivery does *not* reappear within a short
+window after the creating pod's graceful close, but does reappear once the
+real `AckWait` elapses.
+
+One trade-off from this work, now closed (see `ROADMAP.md`): a task whose
+NATS delivery exhausts all retry attempts (`MaxDeliver`, currently 5 — a
+genuine repeated-crash case) had no automatic path back to a terminal DB
+status under `queue_driver=nats`, since the stale-task sweep that used to
+(incorrectly) cover this case is skipped there on purpose (running it
+unconditionally was itself a correctness bug, see above). This is closed with
+an age-based check rather than reinstating the old sweep or hooking into
+NATS's per-message delivery-count internals: `db.Store.FailTasksOlderThan`
+marks a `running`/`queued`/`waiting_for_input` row failed only once its
+`created_at` is older than `stale_task_max_age` (config, default 2 hours —
+comfortably above `max_task_duration`'s own 30-minute default, since this is
+a backstop for a task that never got a fair shot at running at all, not a
+bound on one that's actively running). `cmd/server/main.go` runs it from a
+ticker goroutine every 15 minutes, unconditionally under any queue driver:
+unlike the old sweep, an age predicate only ever touches rows that have been
+non-terminal for an unusually long time — never every non-terminal row right
+now — so it can't reproduce the cross-pod false-failure bug, and is safe
+under `queue_driver=memory` too.
 
 ## Security boundaries
 
@@ -59,6 +156,13 @@ Postgres locally).
 - `internal/tools` must never import `internal/agent` (import-cycle
   prevention) — cross-package calls go through injected function types (e.g.
   `SubAgentRunner`) wired in `internal/server/task_runner.go`.
+- `terraform`/`tflint`/`checkov` (invoked by `ValidateSkill`/
+  `SecurityScanSkill`) can optionally run inside a locked-down Docker
+  container instead of directly on the host process — see
+  `docs/SANDBOX.md`. Disabled by default (`server.sandbox_enabled = false`);
+  when enabled, `internal/sandbox.DockerExecutor` runs them with
+  `--network=none`, dropped capabilities, resource limits, and a non-root
+  user.
 
 ## Running locally
 
@@ -66,4 +170,6 @@ See `CLAUDE.md` for the up-to-date command list (`make build`, `make dev`,
 `make infra`, `make doctor`). This document explains *why* the pieces are
 shaped this way; `CLAUDE.md` is the quick-reference for *how* to build and run
 them day to day — if the two disagree, trust `CLAUDE.md` for commands and file
-an issue to fix this doc.
+an issue to fix this doc. See `docs/SANDBOX.md` for the terraform/tflint/
+checkov execution sandbox specifically, including what's verified working
+today and the Kubernetes Job variant's design (not implemented).

@@ -20,6 +20,59 @@ type ServerConfig struct {
 	QueueBuffer         int    `toml:"queue_buffer"`
 	NATSMaxMsgs         int    `toml:"nats_max_msgs"`         // max total backlog across all named NATS queues sharing the TF_AGENT stream (backpressure); default 5000
 	ShutdownGracePeriod int    `toml:"shutdown_grace_period"` // seconds; default 60. How long to wait for in-flight tasks to finish before force-cancelling on shutdown.
+	StaleTaskMaxAge     int    `toml:"stale_task_max_age"`    // seconds; default 7200 (2 hours). Age-based reconciliation backstop (db.Store.FailTasksOlderThan, run periodically from cmd/server/main.go) for a task whose queue delivery is abandoned/redelivered until it exhausts the queue's max-delivery-attempts and never reaches a terminal DB status any other way. Deliberately well above Agent.MaxTaskDuration's own default (1800s / 30 minutes): that field bounds a task that IS running; this one is a last-resort net for a task that never got a fair shot at running at all, so it must never fire on a task that's merely taking a while.
+
+	// SemaphoreAcquireTimeout bounds how long a dequeued task will wait for
+	// an LLM concurrency slot (the global semaphore, and separately the
+	// per-user one) before failing cleanly instead of blocking the queue
+	// worker goroutine — and this task's NATS delivery heartbeat — forever.
+	// Without a bound, a task stuck here never reaches the point where its
+	// context.CancelFunc is registered in Runner.cancels, so it is also
+	// unreachable by Shutdown's grace-period force-cancel path. Seconds;
+	// default 300 (5 minutes) — long enough to ride out a brief burst of
+	// load, short enough that a genuinely saturated server sheds queued work
+	// instead of accumulating permanently-blocked goroutines.
+	SemaphoreAcquireTimeout int `toml:"semaphore_acquire_timeout"`
+
+	// Sandbox controls whether ValidateSkill/SecurityScanSkill run
+	// terraform/tflint/checkov inside a container (internal/sandbox) instead
+	// of shelling out directly on the host. Defaults to disabled so existing
+	// local dev / `make run` setups without Docker keep working unchanged.
+	SandboxEnabled bool `toml:"sandbox_enabled"`
+	// SandboxImage defaults to the published ghcr.io reference (see
+	// Defaults() below), not a bare local tag. This matters for the
+	// Kubernetes backend specifically: an unqualified name like
+	// "iac-agent-sandbox:latest" would resolve to Docker Hub
+	// (docker.io/library/...) when a real cluster tries to pull it, which
+	// doesn't exist there — a real image reference is required for that
+	// backend to work at all. The Docker backend benefits too: `docker run`
+	// pulls a fully-qualified reference automatically if it's not already
+	// built locally, so sandbox_enabled=true works out of the box without
+	// requiring `make sandbox-build` first (a local build, or overriding
+	// this to a local tag, still takes precedence via Docker's local cache).
+	SandboxImage  string `toml:"sandbox_image"`
+	SandboxMemory string `toml:"sandbox_memory"` // Docker --memory value, e.g. "512m"
+	SandboxCPUs   string `toml:"sandbox_cpus"`   // Docker --cpus value, e.g. "1"
+
+	// SandboxBackend selects which sandbox.Executor implementation
+	// SandboxEnabled wires up: "docker" (default) runs sandbox.DockerExecutor
+	// against a local Docker daemon; "kubernetes" runs sandbox.K8sJobExecutor
+	// against a real cluster (see docs/SANDBOX.md). Any other value falls
+	// back to "docker" — SandboxEnabled's existing behavior is unchanged for
+	// anyone who never sets this field.
+	SandboxBackend string `toml:"sandbox_backend"`
+	// SandboxKubeNamespace is the (pre-existing — K8sJobExecutor never
+	// creates it) namespace K8sJobExecutor creates its Jobs in.
+	SandboxKubeNamespace string `toml:"sandbox_kube_namespace"`
+	// SandboxKubeconfigPath, if set, is passed to K8sJobExecutor instead of
+	// the standard client-go kubeconfig resolution order ($KUBECONFIG, then
+	// ~/.kube/config, then in-cluster config when running inside a pod).
+	SandboxKubeconfigPath string `toml:"sandbox_kubeconfig_path"`
+	// SandboxKubeMemory/SandboxKubeCPUs are Kubernetes resource.Quantity
+	// strings (e.g. "512Mi", "1") — not the same syntax as
+	// SandboxMemory/SandboxCPUs, which are Docker --memory/--cpus values.
+	SandboxKubeMemory string `toml:"sandbox_kube_memory"`
+	SandboxKubeCPUs   string `toml:"sandbox_kube_cpus"`
 }
 
 type ProviderConfig struct {
@@ -86,12 +139,22 @@ func Defaults() *Config {
 			MaxTaskDuration:     30 * 60,       // 30 minutes in seconds
 		},
 		Server: ServerConfig{
-			Port:                8080,
-			LLMConcurrency:      10,
-			PerUserConcurrency:  3,
-			QueueBuffer:         500,
-			NATSMaxMsgs:         5000, // NATS is durable and meant to hold more backlog than the in-memory QueueBuffer (500); keep in sync with queue.DefaultNATSMaxMsgs
-			ShutdownGracePeriod: 60,
+			Port:                    8080,
+			LLMConcurrency:          10,
+			PerUserConcurrency:      3,
+			QueueBuffer:             500,
+			NATSMaxMsgs:             5000, // NATS is durable and meant to hold more backlog than the in-memory QueueBuffer (500); keep in sync with queue.DefaultNATSMaxMsgs
+			ShutdownGracePeriod:     60,
+			StaleTaskMaxAge:         2 * 60 * 60, // 2 hours in seconds; ~4x Agent.MaxTaskDuration's own 30-minute default, see field comment
+			SemaphoreAcquireTimeout: 5 * 60,      // 5 minutes in seconds, see field comment
+			SandboxEnabled:          false,
+			SandboxImage:            "ghcr.io/asingh-x/iac-agent/sandbox:latest",
+			SandboxMemory:           "512m",
+			SandboxCPUs:             "1",
+			SandboxBackend:          "docker",
+			SandboxKubeNamespace:    "iac-agent-sandbox",
+			SandboxKubeMemory:       "512Mi",
+			SandboxKubeCPUs:         "1",
 		},
 		Permissions: PermissionsConfig{
 			// Destructive tools (mutate the filesystem or run arbitrary shell

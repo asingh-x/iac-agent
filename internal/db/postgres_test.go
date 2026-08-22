@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/tf-agent/tf-agent/internal/db"
 )
@@ -125,12 +126,34 @@ func TestPostgres_TaskLifecycle(t *testing.T) {
 		t.Error("expected started_at to be set")
 	}
 
-	if err := s.UpdateTaskPendingQuestion(ctx, task.ID, "Which region?"); err != nil {
+	if err := s.UpdateTaskPendingQuestion(ctx, task.ID, "Which region?", db.PendingKindQuestion); err != nil {
 		t.Fatalf("UpdateTaskPendingQuestion: %v", err)
 	}
 	got, _ = s.GetTask(ctx, task.ID)
 	if got.PendingQuestion != "Which region?" {
 		t.Errorf("got pending_question %q, want 'Which region?'", got.PendingQuestion)
+	}
+	if got.PendingKind != db.PendingKindQuestion {
+		t.Errorf("got pending_kind %q, want %q", got.PendingKind, db.PendingKindQuestion)
+	}
+
+	// A permission pause is the same status but a different kind — the two
+	// must be distinguishable after a reconnect.
+	if err := s.UpdateTaskPendingQuestion(ctx, task.ID, "Approve Bash: terraform apply", db.PendingKindPermission); err != nil {
+		t.Fatalf("UpdateTaskPendingQuestion (permission): %v", err)
+	}
+	got, _ = s.GetTask(ctx, task.ID)
+	if got.PendingKind != db.PendingKindPermission {
+		t.Errorf("got pending_kind %q, want %q", got.PendingKind, db.PendingKindPermission)
+	}
+
+	// Clearing wipes both fields.
+	if err := s.UpdateTaskPendingQuestion(ctx, task.ID, "", ""); err != nil {
+		t.Fatalf("UpdateTaskPendingQuestion (clear): %v", err)
+	}
+	got, _ = s.GetTask(ctx, task.ID)
+	if got.PendingQuestion != "" || got.PendingKind != "" {
+		t.Errorf("got pending_question %q / pending_kind %q, want both empty", got.PendingQuestion, got.PendingKind)
 	}
 
 	if err := s.UpdateTaskResult(ctx, task.ID, "done", "https://github.com/pr/1", "", "output text", 100, 200); err != nil {
@@ -200,6 +223,61 @@ func TestPostgres_MarkStaleTasksFailed_SkipsCompletedAt(t *testing.T) {
 	got, _ := s.GetTask(ctx, task.ID)
 	if got.Status != "running" {
 		t.Errorf("got status %q, want unchanged (running) — completed_at must guard against retroactive failure", got.Status)
+	}
+}
+
+// TestPostgres_FailTasksOlderThan exercises the real Postgres query, not just
+// the in-memory implementation. There's no store method to backdate
+// created_at (on purpose — see backdateTaskForTest's doc comment in
+// memory_test.go for why memStore only gets one for tests), so this instead
+// leans on maxAge itself: a maxAge of 0 makes "now" the cutoff, and the task
+// row's created_at is necessarily a little earlier than that (it was
+// INSERTed before this call), so it's reconciled; a maxAge of one hour is
+// certainly larger than the sub-second gap between CreateTask and this call,
+// so the second task is left alone.
+func TestPostgres_FailTasksOlderThan(t *testing.T) {
+	s := newPostgresStore(t)
+	ctx := context.Background()
+
+	u, err := s.CreateUser(ctx, "pg-reconcile-user", "reconcilehash", "member")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { _ = s.DeleteUser(ctx, u.ID) })
+
+	old, _ := s.CreateTask(ctx, u.ID, "prompt", "genuinely stuck task", "print")
+	if err := s.UpdateTaskStatus(ctx, old.ID, "running"); err != nil {
+		t.Fatalf("UpdateTaskStatus: %v", err)
+	}
+
+	n, err := s.FailTasksOlderThan(ctx, 0, "reconciled by test")
+	if err != nil {
+		t.Fatalf("FailTasksOlderThan: %v", err)
+	}
+	if n < 1 {
+		t.Errorf("FailTasksOlderThan reconciled %d rows, want at least 1", n)
+	}
+
+	got, _ := s.GetTask(ctx, old.ID)
+	if got.Status != "failed" {
+		t.Errorf("got status %q, want failed", got.Status)
+	}
+	if got.ErrorMsg != "reconciled by test" {
+		t.Errorf("got error_msg %q, want %q", got.ErrorMsg, "reconciled by test")
+	}
+
+	fresh, _ := s.CreateTask(ctx, u.ID, "prompt", "fresh running task", "print")
+	if err := s.UpdateTaskStatus(ctx, fresh.ID, "running"); err != nil {
+		t.Fatalf("UpdateTaskStatus (fresh): %v", err)
+	}
+
+	if _, err := s.FailTasksOlderThan(ctx, time.Hour, "should not apply"); err != nil {
+		t.Fatalf("FailTasksOlderThan (1h threshold): %v", err)
+	}
+
+	gotFresh, _ := s.GetTask(ctx, fresh.ID)
+	if gotFresh.Status != "running" {
+		t.Errorf("fresh task status = %q, want unchanged (running)", gotFresh.Status)
 	}
 }
 

@@ -1,7 +1,7 @@
 # iac-agent
 
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Go](https://img.shields.io/badge/go-1.25-00ADD8)
+![Go](https://img.shields.io/badge/go-1.26-00ADD8)
 
 > Near-deterministic IaC automation — takes a Terraform task and delivers a validated GitHub PR, fully autonomous, end-to-end, in under 10 minutes.
 
@@ -69,6 +69,7 @@ The next generation of AI tooling isn't smarter chat. It's specialized skills, a
 | **Multi-provider LLM** | Anthropic API or AWS Bedrock — swap in config |
 | **Configurable permissions** | `auto` / `confirm` / `deny` policy for destructive tool calls |
 | **Prometheus metrics** | Task duration, token usage, throughput at `/metrics` |
+| **Multi-replica safe** | Run N pods behind a plain load balancer — no sticky sessions. SSE streaming and answer/permission/cancel requests work no matter which pod a request lands on (see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)) |
 
 ---
 
@@ -202,7 +203,7 @@ make test-all
 | Component | Small (≤ 10) | Mid-size (10–50) | Large (50–100+) |
 |---|---|---|---|
 | **Database** | PostgreSQL | PostgreSQL | PostgreSQL — connection pooling, read replicas |
-| **Queue** | In-memory (default) | In-memory or **NATS JetStream** | **NATS JetStream** — multiple agent workers, per-queue routing |
+| **Queue** | In-memory (default) | **NATS JetStream** (required for multiple replicas) | **NATS JetStream** — multiple agent workers, per-queue routing |
 | **LLM provider** | Anthropic API | Anthropic API | **AWS Bedrock** — no rate limits, private VPC, SOC2 |
 | **Agent workers** | 1 process | 1–3 processes | Horizontal pod autoscaling (Kubernetes) |
 | **Storage** | Local filesystem | Local or EFS-backed volume | **EFS / S3** via Kubernetes PVC — state survives restarts, cloud-agnostic (AWS/GCP/Azure) |
@@ -212,7 +213,7 @@ make test-all
 
 ### What to swap out first as you grow
 
-**In-memory queue → NATS JetStream** — when you want multiple worker processes, per-team queues (e.g. `default,security`), or durable message replay if a worker crashes.
+**In-memory queue → NATS JetStream** — **required** the moment you run more than one replica, not just a nice-to-have. With the default in-memory queue every piece of per-task state is process-local: the queue itself, SSE streams, and the answer / permission / cancel endpoints. A second replica means a client's stream can land on a pod that isn't running its task, and an approval can be POSTed to a pod that never sees it. Switching to NATS also switches those paths onto a cross-pod relay, automatically — there's no separate flag. It's also what gets you per-team queues (e.g. `default,security`) and durable redelivery if a worker crashes.
 
 ```toml
 [server]
@@ -236,7 +237,7 @@ model  = "us.anthropic.claude-opus-4-6-20251101-v1:0"
 
 ## Requirements
 
-- Go 1.25+
+- Go 1.26+
 - Node 20+ (for the web UI)
 - An Anthropic API key (or AWS Bedrock credentials)
 - `terraform` CLI, `tflint`, `checkov` (for validate/security skills)
@@ -415,7 +416,7 @@ Admin-only:
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for the full prioritised backlog across reliability, testing, performance, observability, and deployment.
+See [ROADMAP.md](ROADMAP.md) for what's still open, and [CHANGELOG.md](CHANGELOG.md) for what's already shipped.
 
 ---
 
