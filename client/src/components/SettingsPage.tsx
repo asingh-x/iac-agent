@@ -111,7 +111,11 @@ function ProfileSection({ userInfo, onUserUpdate }: { userInfo: UserInfo | null;
 
   const handleSave = async () => {
     const trimmed = username.trim();
-    if (!trimmed || trimmed === userInfo?.username) return;
+    if (!trimmed) {
+      setError("Display name is required.");
+      return;
+    }
+    if (trimmed === userInfo?.username) return;
     setSaving(true);
     setError(null);
     try {
@@ -133,7 +137,7 @@ function ProfileSection({ userInfo, onUserUpdate }: { userInfo: UserInfo | null;
       />
 
       <div className="card" style={{ marginTop: 20 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 20, padding: "12px 16px", background: "var(--surface-2)", borderRadius: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 20, padding: "12px 16px", background: "var(--surface-2)", borderRadius: "var(--radius-sm)" }}>
           <div style={{
             width: 44, height: 44, borderRadius: "50%", flexShrink: 0,
             background: "var(--accent)", color: "#fff",
@@ -170,7 +174,7 @@ function ProfileSection({ userInfo, onUserUpdate }: { userInfo: UserInfo | null;
           <button
             className="btn btn-primary"
             onClick={handleSave}
-            disabled={saving || !username.trim() || username.trim() === userInfo?.username}
+            disabled={saving}
           >
             {saving ? "Saving…" : "Save"}
           </button>
@@ -197,7 +201,10 @@ function GitHubSection({ isSet, onSaved }: { isSet: boolean; onSaved: () => void
   };
 
   const handleSave = async () => {
-    if (!token.trim()) return;
+    if (!token.trim()) {
+      setError("Token is required.");
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
@@ -257,7 +264,7 @@ function GitHubSection({ isSet, onSaved }: { isSet: boolean; onSaved: () => void
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <button className="btn btn-primary" onClick={handleSave} disabled={saving || !token.trim()}>
+          <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
             {saving ? "Saving…" : "Save"}
           </button>
           {saved && <SavedBadge />}

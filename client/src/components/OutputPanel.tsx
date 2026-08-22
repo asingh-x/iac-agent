@@ -65,6 +65,7 @@ export function OutputPanel({ output, state, prUrl, pendingQuestion, pendingPerm
   const [spinnerFrame, setSpinnerFrame] = useState(0);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [answerDraft, setAnswerDraft] = useState("");
+  const [answerError, setAnswerError] = useState("");
 
   useEffect(() => {
     if (state !== "streaming") return;
@@ -86,7 +87,12 @@ export function OutputPanel({ output, state, prUrl, pendingQuestion, pendingPerm
 
   const submitAnswer = () => {
     const a = answerDraft.trim();
-    if (!a || !onAnswer) return;
+    if (!a) {
+      setAnswerError("Please enter an answer.");
+      return;
+    }
+    setAnswerError("");
+    if (!onAnswer) return;
     setAnswerDraft("");
     onAnswer(a);
   };
@@ -122,15 +128,9 @@ export function OutputPanel({ output, state, prUrl, pendingQuestion, pendingPerm
         </div>
       </div>
 
-      {/* ── Chronological stream — styled like a real terminal session ────────── */}
+      {/* ── Chronological stream ──────────────────────────────────────────────── */}
       {items.length > 0 && (
-        <div className="terminal-window">
-          <div className="terminal-titlebar">
-            <span className="terminal-dot red" />
-            <span className="terminal-dot yellow" />
-            <span className="terminal-dot green" />
-            <span className="terminal-title">iac-agent — task</span>
-          </div>
+        <div className="card" style={{ padding: 0, overflow: "hidden" }}>
           <div className="output-stream">
           {items.map((item) => {
             // ── Text block ──────────────────────────────────────────────────
@@ -251,7 +251,7 @@ export function OutputPanel({ output, state, prUrl, pendingQuestion, pendingPerm
               rows={2}
               placeholder="Type your answer…"
               value={answerDraft}
-              onChange={(e) => setAnswerDraft(e.target.value)}
+              onChange={(e) => { setAnswerDraft(e.target.value); setAnswerError(""); }}
               onKeyDown={(e) => {
                 if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
                   e.preventDefault();
@@ -264,12 +264,12 @@ export function OutputPanel({ output, state, prUrl, pendingQuestion, pendingPerm
             <button
               className="btn btn-primary"
               onClick={submitAnswer}
-              disabled={!answerDraft.trim()}
               style={{ alignSelf: "flex-end", whiteSpace: "nowrap" }}
             >
               Send →
             </button>
           </div>
+          {answerError && <div className="form-error" style={{ marginTop: 6 }}>{answerError}</div>}
           <div style={{ fontSize: "var(--text-xs)", color: "var(--text-3)", marginTop: 6 }}>
             ⌘ + Enter to send
           </div>
@@ -352,7 +352,7 @@ function InlineCodeBlock({ lang, code }: { lang: string; code: string }) {
     });
   };
   return (
-    <div style={{ margin: "10px 0", border: "1px solid var(--border)", borderRadius: 6, overflow: "hidden" }}>
+    <div style={{ margin: "10px 0", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", overflow: "hidden" }}>
       <div style={{
         display: "flex", alignItems: "center", justifyContent: "space-between",
         background: "var(--surface-2)", padding: "6px 12px", borderBottom: "1px solid var(--border)",

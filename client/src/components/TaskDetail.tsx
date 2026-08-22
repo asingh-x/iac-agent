@@ -18,6 +18,7 @@ export function TaskDetail({ taskId, onBack }: Props) {
   const [task, setTask] = useState<TTaskDetail | null>(null);
   const [error, setError] = useState("");
   const [answer, setAnswer] = useState("");
+  const [answerError, setAnswerError] = useState("");
   const [sending, setSending] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [respondingPermission, setRespondingPermission] = useState(false);
@@ -45,7 +46,12 @@ export function TaskDetail({ taskId, onBack }: Props) {
   }
 
   const handleSendAnswer = async () => {
-    if (!answer.trim() || sending) return;
+    if (sending) return;
+    if (!answer.trim()) {
+      setAnswerError("Please enter an answer.");
+      return;
+    }
+    setAnswerError("");
     setSending(true);
     try {
       await answerTask(taskId, answer.trim());
@@ -213,7 +219,7 @@ export function TaskDetail({ taskId, onBack }: Props) {
               rows={2}
               placeholder="Type your answer…"
               value={answer}
-              onChange={(e) => setAnswer(e.target.value)}
+              onChange={(e) => { setAnswer(e.target.value); setAnswerError(""); }}
               onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); handleSendAnswer(); } }}
               style={{ flex: 1, resize: "none" }}
               autoFocus
@@ -221,12 +227,13 @@ export function TaskDetail({ taskId, onBack }: Props) {
             <button
               className="btn btn-primary"
               onClick={handleSendAnswer}
-              disabled={sending || !answer.trim()}
+              disabled={sending}
               style={{ alignSelf: "flex-end", whiteSpace: "nowrap" }}
             >
               {sending ? "Sending…" : "Send →"}
             </button>
           </div>
+          {answerError && <div className="form-error" style={{ marginTop: 6 }}>{answerError}</div>}
           <div style={{ fontSize: "var(--text-xs)", color: "var(--text-3)", marginTop: 6 }}>
             ⌘ + Enter to send
           </div>

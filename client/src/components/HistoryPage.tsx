@@ -46,7 +46,7 @@ export function HistoryPage({ onSelectTask, refreshTrigger }: Props) {
           Recent Tasks
         </div>
         <div style={{ fontSize: "var(--text-sm)", color: "var(--text-3)", marginTop: 3 }}>
-          All tasks submitted to iac-agent
+          All tasks submitted to IAC Agent
         </div>
       </div>
 
@@ -171,7 +171,7 @@ export function HistoryPage({ onSelectTask, refreshTrigger }: Props) {
                     onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}
                     style={{
                       fontSize: "var(--text-xs)", color: "var(--text)", background: "var(--surface)",
-                      border: "1px solid var(--border-strong)", borderRadius: 5, padding: "3px 6px",
+                      border: "1px solid var(--border-strong)", borderRadius: "var(--radius-sm)", padding: "3px 6px",
                       cursor: "pointer", outline: "none",
                     }}
                   >
@@ -296,7 +296,7 @@ function PageBtn({ children, disabled, onClick }: { children: React.ReactNode; d
       disabled={disabled}
       style={{
         width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center",
-        background: "var(--surface)", border: "1px solid var(--border-strong)", borderRadius: 6,
+        background: "var(--surface)", border: "1px solid var(--border-strong)", borderRadius: "var(--radius-sm)",
         fontSize: "var(--text-sm)", color: disabled ? "var(--text-3)" : "var(--text-2)",
         cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.5 : 1,
       }}

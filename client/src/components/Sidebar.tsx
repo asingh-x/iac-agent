@@ -41,16 +41,19 @@ export function Sidebar({
       {/* Brand */}
       <div className="sidebar-brand" onClick={onGoHome} style={{ cursor: "pointer" }} title="Home">
         <div style={{
-          width: 30, height: 30, borderRadius: 8, flexShrink: 0,
+          width: 30, height: 30, borderRadius: "var(--radius-sm)", flexShrink: 0,
           background: "var(--accent-subtle)",
           display: "flex", alignItems: "center", justifyContent: "center",
         }}>
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-            <polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M9.5 3.5c-1.4 0-2.3.9-2.3 2.3v2.8c0 1.2-.6 1.9-1.9 2.4 1.3.5 1.9 1.2 1.9 2.4v2.8c0 1.4.9 2.3 2.3 2.3"/>
+            <path d="M14.5 3.5c1.4 0 2.3.9 2.3 2.3v2.8c0 1.2.6 1.9 1.9 2.4-1.3.5-1.9 1.2-1.9 2.4v2.8c0 1.4-.9 2.3-2.3 2.3"/>
+            <circle cx="10.3" cy="12" r="1.2" fill="var(--accent)" stroke="none"/>
+            <circle cx="13.7" cy="12" r="1.2" fill="var(--accent)" stroke="none"/>
           </svg>
         </div>
         <div>
-          <div className="sidebar-brand-name">iac-agent</div>
+          <div className="sidebar-brand-name">IAC Agent</div>
           <div className="sidebar-brand-tag">Terraform automation</div>
         </div>
       </div>
@@ -62,7 +65,7 @@ export function Sidebar({
           onClick={onNewTask}
           style={{
             display: "flex", alignItems: "center", gap: 8,
-            width: "100%", padding: "7px 10px", borderRadius: 6,
+            width: "100%", padding: "7px 10px", borderRadius: "var(--radius-sm)",
             fontSize: "var(--text-sm)", fontWeight: 500,
             color: activeView === "form" ? "var(--accent)" : "var(--text-3)",
             background: activeView === "form" ? "var(--accent-subtle)" : "transparent",
@@ -105,7 +108,7 @@ export function Sidebar({
             backdropFilter: "blur(20px) saturate(180%)",
             WebkitBackdropFilter: "blur(20px) saturate(180%)",
             border: "1px solid var(--border)",
-            borderRadius: 14, boxShadow: "0 -4px 20px rgba(0,0,0,.1)",
+            borderRadius: "var(--radius-sm)", boxShadow: "0 -4px 20px rgba(0,0,0,.1)",
             overflow: "hidden", animation: "slideUp .15s ease",
           }}>
             {/* Username header */}
@@ -210,7 +213,7 @@ function NavItem({ label, active, onClick, icon }: { label: string; active: bool
       onClick={onClick}
       style={{
         display: "flex", alignItems: "center", gap: 8,
-        width: "100%", padding: "7px 10px", borderRadius: 6,
+        width: "100%", padding: "7px 10px", borderRadius: "var(--radius-sm)",
         fontSize: "var(--text-sm)", fontWeight: 500,
         color: active ? "var(--accent)" : "var(--text-3)",
         background: active ? "var(--accent-subtle)" : "transparent",

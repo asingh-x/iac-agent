@@ -23,17 +23,24 @@
   --nav-active-border: #f0c4b0;
   --green:         #2d7a47;
   --green-bg:      #edf7f1;
+  --green-bg-hover:#d7f0e3;
+  --green-border:  #a7d9bc;
   --red:           #c0392b;
   --red-bg:        #fdf0ee;
+  --red-border:    #f5c6c2;
   --amber:         #a16207;
   --amber-bg:      #fefce8;
-  --blue:          #2563eb;
+  --amber-border:  #fde68a;
+  --blue:          #6a9bcc;
+  --blue-bg:       #eaf1f8;
+  --accent-focus-ring: rgba(217,119,87,.12);
   --code-bg:       #1a1915;
   --code-text:     #e8e6df;
-  --radius:        12px;
-  --radius-sm:     8px;
-  --shadow:        0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
-  --shadow-md:     0 4px 12px rgba(0,0,0,.08), 0 2px 4px rgba(0,0,0,.04);
+  /* Very subtle rounding — soft edges without looking bubbly. */
+  --radius:        6px;
+  --radius-sm:     4px;
+  /* Flat design — no drop shadows on cards/buttons, borders do all the work. */
+  --shadow:        none;
   --font:          'Inter', system-ui, sans-serif;
   --font-mono:     'IBM Plex Mono', 'Menlo', monospace;
   --text-xs:   11px;
@@ -62,15 +69,16 @@ button { font-family: var(--font); cursor: pointer; border: none; background: no
 
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: var(--surface-2); }
-::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: var(--radius-sm); }
 
 /* ── Form elements ── */
 .form-row   { display: flex; flex-direction: column; gap: 6px; }
 .form-label { font-size: var(--text-sm); font-weight: 500; color: var(--text-2); }
 .form-hint  { font-size: var(--text-sm); color: var(--text-3); }
+.form-error { font-size: var(--text-sm); color: var(--red); }
 .form-input {
   background: var(--surface);
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 10px 12px;
   font-size: var(--text-sm);
@@ -83,7 +91,7 @@ button { font-family: var(--font); cursor: pointer; border: none; background: no
 .form-input:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(217,119,87,.12);
+  box-shadow: 0 0 0 3px var(--accent-focus-ring);
 }
 .form-input::placeholder { color: var(--text-3); font-size: var(--text-sm); }
 
@@ -94,37 +102,32 @@ button { font-family: var(--font); cursor: pointer; border: none; background: no
     padding: 9px 18px;
     font-size: var(--text-sm); font-weight: 500; font-family: var(--font);
     color: var(--text); background: var(--surface);
-    border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
-    cursor: pointer; transition: border-color .15s, background .15s, box-shadow .15s;
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    cursor: pointer; transition: border-color .15s, background .15s;
     line-height: 1;
-    box-shadow: 0 1px 2px rgba(0,0,0,.06);
   }
   .btn:hover:not(:disabled) {
-    border-color: #b0a898;
-    background: var(--surface);
-    box-shadow: 0 2px 6px rgba(0,0,0,.1);
+    border-color: var(--border-strong);
+    background: var(--surface-2);
     color: var(--text);
   }
-  .btn:active:not(:disabled) { box-shadow: none; background: var(--surface-2); }
-  .btn:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; }
+  .btn:active:not(:disabled) { background: var(--surface-2); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
 
-  /* Dark primary button (matches claude.ai's actual send/CTA button) — the
-     orange stays an accent for borders, highlights, and small indicators
-     rather than the fill for large buttons, which reads better at scale. */
+  /* Same accent-border language already used for the active nav item
+     (accent-subtle fill, nav-active-border, accent text) — an outline
+     button built from existing design-system tokens, not an ad hoc color. */
   .btn-primary {
-    background: var(--text);
-    color: var(--bg);
-    border-color: var(--text);
+    background: var(--accent-subtle);
+    color: var(--accent-hover);
+    border-color: var(--nav-active-border);
     font-weight: 600;
-    box-shadow: 0 1px 3px rgba(0,0,0,.2), 0 1px 2px rgba(0,0,0,.12);
   }
   .btn-primary:hover:not(:disabled) {
-    background: #2b2a26;
-    border-color: #2b2a26;
-    color: var(--bg);
-    box-shadow: 0 3px 8px rgba(0,0,0,.25), 0 1px 3px rgba(0,0,0,.15);
+    background: var(--surface);
+    border-color: var(--accent);
+    color: var(--accent-hover);
   }
-  .btn-primary:active:not(:disabled) { box-shadow: 0 1px 2px rgba(0,0,0,.2); }
   /* A faded accent color reads as "pale brand color", not "disabled" — flip
      to a flat neutral instead so disabled state is unambiguous. */
   .btn-primary:disabled {
@@ -135,8 +138,7 @@ button { font-family: var(--font); cursor: pointer; border: none; background: no
   }
 
   .btn-sm {
-    padding: 5px 12px; font-size: var(--text-xs);
-    box-shadow: 0 1px 2px rgba(0,0,0,.05);
+    padding: 6px 14px; font-size: var(--text-xs);
   }
 
   .btn-ghost {
@@ -160,15 +162,15 @@ button { font-family: var(--font); cursor: pointer; border: none; background: no
 
 /* ── Status chips ── */
 .chip {
-  display: inline-block; padding: 2px 8px; border-radius: 10px;
+  display: inline-block; padding: 2px 8px; border-radius: var(--radius-sm);
   font-size: var(--text-xs); font-weight: 600;
 }
-.chip-done    { background: var(--green-bg);      color: var(--green);   border: 1px solid #a7d9bc; }
-.chip-running { background: var(--accent-subtle);  color: var(--accent);  border: 1px solid #f0c4b0; }
-.chip-failed  { background: var(--red-bg);         color: var(--red);     border: 1px solid #f5c6c2; }
+.chip-done    { background: var(--green-bg);      color: var(--green);   border: 1px solid var(--green-border); }
+.chip-running { background: var(--accent-subtle);  color: var(--accent);  border: 1px solid var(--nav-active-border); }
+.chip-failed  { background: var(--red-bg);         color: var(--red);     border: 1px solid var(--red-border); }
 .chip-queued  { background: var(--surface-2);      color: var(--text-3);  border: 1px solid var(--border-strong); }
-.chip-active  { background: var(--green-bg);       color: var(--green);   border: 1px solid #a7d9bc; }
-.chip-waiting { background: var(--amber-bg);       color: var(--amber);   border: 1px solid #fde68a; }
+.chip-active  { background: var(--green-bg);       color: var(--green);   border: 1px solid var(--green-border); }
+.chip-waiting { background: var(--amber-bg);       color: var(--amber);   border: 1px solid var(--amber-border); }
 
 /* ── Code block ── */
 .code-block {
@@ -192,26 +194,26 @@ button { font-family: var(--font); cursor: pointer; border: none; background: no
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: #f5f5f5;
+  background: var(--surface-2);
   padding: 8px 14px;
-  border-bottom: 1px solid #e0e0e0;
+  border-bottom: 1px solid var(--border);
 }
 .code-block-lang {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  color: #888;
+  color: var(--text-3);
   font-weight: 500;
   text-transform: uppercase;
   letter-spacing: .05em;
 }
 .copy-btn {
   display: inline-flex; align-items: center; gap: 4px;
-  font-size: var(--text-xs); font-weight: 500; color: #666;
-  background: none; border: 1px solid #ccc; border-radius: 5px;
+  font-size: var(--text-xs); font-weight: 500; color: var(--text-2);
+  background: none; border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
   padding: 2px 8px; cursor: pointer; font-family: var(--font);
   transition: color .15s, border-color .15s;
 }
-.copy-btn:hover { color: #333; border-color: #999; }
+.copy-btn:hover { color: var(--text); border-color: var(--text-3); }
 .copy-btn.copied { color: var(--green); border-color: var(--green); }
 
 /* ── Timeline ── */
@@ -219,7 +221,7 @@ button { font-family: var(--font); cursor: pointer; border: none; background: no
 .timeline-item {
   display: flex; align-items: flex-start; gap: 10px;
   font-size: var(--text-sm); padding: 6px 8px;
-  border-radius: 6px; color: var(--text-3);
+  border-radius: var(--radius-sm); color: var(--text-3);
   transition: background .12s;
 }
 .tl-dot {
@@ -246,7 +248,7 @@ button { font-family: var(--font); cursor: pointer; border: none; background: no
   border-bottom: 1px solid var(--border);
   display: flex; align-items: center; gap: 10px;
 }
-.sidebar-brand-name { font-size: var(--text-base); font-weight: 700; color: var(--text); letter-spacing: -.02em; }
+.sidebar-brand-name { font-size: var(--text-sm); font-weight: 700; color: var(--text); letter-spacing: .01em; }
 .sidebar-brand-tag  { font-size: var(--text-xs); color: var(--text-3); font-weight: 400; }
 
 .sidebar-section-label {
@@ -257,7 +259,7 @@ button { font-family: var(--font); cursor: pointer; border: none; background: no
 
 .sidebar-item {
   display: flex; align-items: flex-start; gap: 9px;
-  padding: 8px 12px; border-radius: 6px; margin: 0 6px;
+  padding: 8px 12px; border-radius: var(--radius-sm); margin: 0 6px;
   font-size: var(--text-sm); color: var(--text-2);
   cursor: default; transition: background .12s;
   position: relative;
@@ -266,7 +268,7 @@ button { font-family: var(--font); cursor: pointer; border: none; background: no
 .sidebar-item.active { background: var(--surface); box-shadow: var(--shadow); color: var(--text); }
 .sidebar-item.active::before {
   content: ''; position: absolute; left: 0; top: 50%; transform: translateY(-50%);
-  width: 3px; height: 18px; background: var(--accent); border-radius: 0 3px 3px 0;
+  width: 3px; height: 18px; background: var(--accent); border-radius: var(--radius-sm);
 }
 
 .sidebar-footer {
@@ -286,7 +288,7 @@ button { font-family: var(--font); cursor: pointer; border: none; background: no
 .sidebar-username { font-size: var(--text-sm); font-weight: 500; color: var(--text); flex: 1; }
 .sidebar-logout {
   font-size: var(--text-xs); color: var(--text-3); background: none; border: none;
-  cursor: pointer; padding: 3px 6px; border-radius: 5px;
+  cursor: pointer; padding: 3px 6px; border-radius: var(--radius-sm);
   transition: color .12s, background .12s;
 }
 .sidebar-logout:hover { color: var(--red); background: var(--red-bg); }
@@ -306,7 +308,7 @@ button { font-family: var(--font); cursor: pointer; border: none; background: no
 .status-badge {
   display: inline-flex; align-items: center; gap: 4px;
   font-size: var(--text-xs); font-weight: 600;
-  padding: 2px 8px; border-radius: 10px; flex-shrink: 0;
+  padding: 2px 8px; border-radius: var(--radius-sm); flex-shrink: 0;
 }
 .status-badge.done              { background: var(--green-bg);      color: var(--green); }
 .status-badge.failed            { background: var(--red-bg);         color: var(--red); }
@@ -319,38 +321,38 @@ button { font-family: var(--font); cursor: pointer; border: none; background: no
 .pr-chip {
   display: inline-flex; align-items: center; gap: 4px;
   font-size: var(--text-xs); font-weight: 600;
-  padding: 2px 8px; border-radius: 10px;
+  padding: 2px 8px; border-radius: var(--radius-sm);
   background: var(--green-bg); color: var(--green);
-  border: 1px solid #bbf7d0;
+  border: 1px solid var(--green-border);
   text-decoration: none;
   transition: background .12s;
 }
-.pr-chip:hover { background: #d7f0e3; }
+.pr-chip:hover { background: var(--green-bg-hover); }
 
 /* ── Input-type badge (Jira pill) ── */
 .input-type-badge {
-  display: inline-block; padding: 1px 6px; border-radius: 6px;
+  display: inline-block; padding: 1px 6px; border-radius: var(--radius-sm);
   font-size: 10px; font-weight: 700; letter-spacing: .04em;
   flex-shrink: 0;
 }
-.input-type-badge.jira { background: #e0e7ff; color: #3730a3; }
+.input-type-badge.jira { background: var(--blue-bg); color: var(--blue); }
 
 /* ── PR success card ── */
 .pr-card {
   display: flex; align-items: center; justify-content: space-between;
   background: var(--green-bg);
-  border: 1px solid #bbf7d0;
+  border: 1px solid var(--green-border);
   border-radius: var(--radius-sm);
   padding: 12px 16px;
   margin-top: 16px;
 }
 .pr-card-title { font-size: var(--text-sm); font-weight: 600; color: var(--green); }
-.pr-card-url   { font-size: var(--text-xs); color: #5a9970; margin-top: 2px; font-family: var(--font-mono); }
+.pr-card-url   { font-size: var(--text-xs); color: var(--green); margin-top: 2px; font-family: var(--font-mono); }
 
 /* ── Error box ── */
 .error-box {
   font-size: var(--text-sm); color: var(--red);
-  background: var(--red-bg); border: 1px solid #fecaca;
+  background: var(--red-bg); border: 1px solid var(--red-border);
   border-radius: var(--radius-sm); padding: 12px 14px;
   white-space: pre-wrap; word-break: break-word;
   line-height: 1.6;
@@ -359,34 +361,6 @@ button { font-family: var(--font); cursor: pointer; border: none; background: no
 /* ── Divider ── */
 .divider { height: 1px; background: var(--border); margin: 20px 0; }
 
-/* ── Terminal window (task execution feed) ──
-   Styled like an actual terminal session — macOS-style titlebar (traffic
-   lights) + monospace, but a LIGHT color scheme (like running a light-theme
-   terminal), not the classic dark one. Everything inside just uses the
-   normal light-theme tokens already — no scoped overrides needed. */
-.terminal-window {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: hidden;
-  box-shadow: var(--shadow-md);
-}
-.terminal-titlebar {
-  /* Real macOS titlebars are the same color as the window content — just a
-     hairline border separates them, not a different fill. */
-  display: flex; align-items: center; gap: 8px;
-  padding: 10px 14px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
-}
-.terminal-dot { width: 11px; height: 11px; border-radius: 50%; flex-shrink: 0; }
-.terminal-dot.red    { background: #ff5f56; }
-.terminal-dot.yellow { background: #ffbd2e; }
-.terminal-dot.green  { background: #27c93f; }
-.terminal-title {
-  flex: 1; text-align: center; margin-right: 45px;
-  font-size: var(--text-xs); font-family: var(--font-mono); color: var(--text-3);
-}
 
 /* ── Output stream ── */
 .output-stream {
@@ -407,12 +381,12 @@ button { font-family: var(--font); cursor: pointer; border: none; background: no
 }
 
 /* ── Tool blocks (collapsible) ── */
-.tool-block { border-radius: 6px; overflow: hidden; }
+.tool-block { border-radius: var(--radius-sm); overflow: hidden; }
 .tool-block + .tool-block { margin-top: 1px; }
 
 .tool-block-btn {
   display: flex; align-items: center; gap: 9px;
-  width: 100%; padding: 5px 6px; border-radius: 6px;
+  width: 100%; padding: 5px 6px; border-radius: var(--radius-sm);
   background: none; border: none; text-align: left;
   transition: background .1s;
 }
@@ -428,7 +402,7 @@ button { font-family: var(--font); cursor: pointer; border: none; background: no
   margin: 2px 6px 6px;
   background: var(--surface-2);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 10px 12px;
   overflow-x: auto;
 }
@@ -443,10 +417,9 @@ button { font-family: var(--font); cursor: pointer; border: none; background: no
 .waiting-callout {
   position: sticky; bottom: 0;
   background: var(--surface);
-  border: 1.5px solid var(--accent);
+  border: 1px solid var(--accent);
   border-radius: var(--radius);
   padding: 16px 20px;
-  box-shadow: var(--shadow-md);
   animation: slideUp .2s ease;
 }
 .waiting-callout-header {
@@ -467,7 +440,7 @@ button { font-family: var(--font); cursor: pointer; border: none; background: no
 /* ── Settings nav ── */
 .settings-nav-item {
   display: flex; align-items: center; justify-content: space-between;
-  width: 100%; padding: 8px 12px; border-radius: 7px; margin-bottom: 2px;
+  width: 100%; padding: 8px 12px; border-radius: var(--radius-sm); margin-bottom: 2px;
   background: transparent; border: none; cursor: pointer; text-align: left;
   font-size: var(--text-sm); font-weight: 400;
   color: var(--text-2);
@@ -504,8 +477,8 @@ button { font-family: var(--font); cursor: pointer; border: none; background: no
   display: inline-flex; align-items: center; gap: 5px;
   font-size: var(--text-xs); font-weight: 600;
   color: var(--green); background: var(--green-bg);
-  border: 1px solid #bbf7d0;
-  padding: 3px 9px; border-radius: 10px;
+  border: 1px solid var(--green-border);
+  padding: 3px 9px; border-radius: var(--radius-sm);
 }
 
 /* ── Animations ── */

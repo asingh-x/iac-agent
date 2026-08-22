@@ -66,9 +66,9 @@ export function HeroPage({ onNavigate }: Props) {
           Create your PR now.
         </h1>
         <p style={{ fontSize: "var(--text-base)", color: "var(--text-3)", lineHeight: 1.75, maxWidth: 520, marginBottom: 22 }}>
-          Describe what you need. iac-agent scans your repos for existing patterns,
+          Describe what you need. IAC Agent scans your repos for existing patterns,
           writes HCL, runs{" "}
-          <code style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--text-2)", background: "var(--surface-2)", padding: "1px 5px", borderRadius: 4 }}>
+          <code style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--text-2)", background: "var(--surface-2)", padding: "1px 5px", borderRadius: "var(--radius-sm)" }}>
             terraform validate
           </code>
           , and opens a pull request — autonomously.
@@ -166,7 +166,7 @@ export function HeroPage({ onNavigate }: Props) {
                   display: "inline-flex", flexDirection: "column", gap: 2,
                   background: configured ? "var(--green-bg)" : isHovered ? "var(--surface-2)" : "var(--surface)",
                   border: `1px solid ${configured ? "#a7d9bc" : isHovered ? "var(--border-strong)" : "var(--border-strong)"}`,
-                  borderRadius: 10, padding: "7px 12px",
+                  borderRadius: "var(--radius-sm)", padding: "7px 12px",
                   boxShadow: "0 1px 2px rgba(0,0,0,.04)",
                   cursor: clickable ? "pointer" : "default",
                   transition: "background .15s",

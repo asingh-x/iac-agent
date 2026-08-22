@@ -72,7 +72,7 @@ export function AdminPage() {
           User Management
         </div>
         <div style={{ fontSize: "var(--text-sm)", color: "var(--text-3)", marginTop: 4 }}>
-          Create and manage users who can access iac-agent.
+          Create and manage users who can access IAC Agent.
         </div>
       </div>
 
@@ -163,7 +163,7 @@ export function AdminPage() {
                   {/* Role */}
                   <td style={{ padding: "12px 20px" }}>
                     <span style={{
-                      fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 10,
+                      fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: "var(--radius-sm)",
                       background: u.role === "admin" ? "var(--accent-subtle)" : "var(--surface-2, #f5f4f0)",
                       color: u.role === "admin" ? "var(--accent)" : "var(--text-2)",
                       border: u.role === "admin" ? "1px solid #f0c4b0" : "1px solid var(--border)",
@@ -174,7 +174,7 @@ export function AdminPage() {
                   {/* Status */}
                   <td style={{ padding: "12px 20px" }}>
                     <span style={{
-                      fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 10,
+                      fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: "var(--radius-sm)",
                       background: u.active ? "var(--green-bg, #edf7f1)" : "var(--surface-2)",
                       color: u.active ? "var(--green, #2d7a47)" : "var(--text-3)",
                       border: u.active ? "1px solid #a7d9bc" : "1px solid var(--border)",
@@ -256,7 +256,10 @@ function EditUserForm({ user, onSaved, onCancel }: { user: AdminUser; onSaved: (
   const [error, setError] = useState<string | null>(null);
 
   const handleSave = async () => {
-    if (!username.trim()) return;
+    if (!username.trim()) {
+      setError("Username is required.");
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
@@ -293,7 +296,7 @@ function EditUserForm({ user, onSaved, onCancel }: { user: AdminUser; onSaved: (
       </div>
       {error && <div className="error-box" style={{ marginBottom: 12 }}>{error}</div>}
       <div style={{ display: "flex", gap: 8 }}>
-        <button className="btn btn-primary" onClick={handleSave} disabled={saving || !username.trim()}>
+        <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
           {saving ? "Saving…" : "Save changes"}
         </button>
         <button className="btn" onClick={onCancel} style={{ background: "transparent", border: "1px solid var(--border)", color: "var(--text-2)" }}>
@@ -324,7 +327,7 @@ function NewTokenBanner({ username, token, onDone }: { username: string; token: 
       </div>
       <div style={{
         display: "flex", alignItems: "center", gap: 8,
-        background: "var(--code-bg, #1a1915)", borderRadius: 6, padding: "10px 14px",
+        background: "var(--code-bg, #1a1915)", borderRadius: "var(--radius-sm)", padding: "10px 14px",
         fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)", color: "var(--code-text)", wordBreak: "break-all",
       }}>
         <span style={{ flex: 1 }}>{token}</span>
@@ -346,7 +349,10 @@ function CreateUserForm({ onCreated, onCancel }: { onCreated: (token: string, us
   const [error, setError] = useState<string | null>(null);
 
   const handleCreate = async () => {
-    if (!username.trim()) return;
+    if (!username.trim()) {
+      setError("Username is required.");
+      return;
+    }
     setSaving(true);
     setError(null);
     // Generate tfa- prefixed token client-side for creation flow
@@ -384,7 +390,7 @@ function CreateUserForm({ onCreated, onCancel }: { onCreated: (token: string, us
       </div>
       {error && <div className="error-box" style={{ marginBottom: 12 }}>{error}</div>}
       <div style={{ display: "flex", gap: 8 }}>
-        <button className="btn btn-primary" onClick={handleCreate} disabled={saving || !username.trim()}>
+        <button className="btn btn-primary" onClick={handleCreate} disabled={saving}>
           {saving ? "Creating…" : "Create user"}
         </button>
         <button className="btn" onClick={onCancel} style={{ background: "transparent", border: "1px solid var(--border)", color: "var(--text-2)" }}>

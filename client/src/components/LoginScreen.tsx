@@ -14,18 +14,21 @@ export function LoginScreen({ onLogin }: Props) {
     e.preventDefault();
     setError("");
     const trimmed = token.trim();
-    if (!trimmed) return;
+    if (!trimmed) {
+      setError("err: key required");
+      return;
+    }
     setLoading(true);
     try {
       const ok = await verifyToken(trimmed);
       if (!ok) {
-        setError("Invalid token. Check with your administrator.");
+        setError("err: invalid token — check with your administrator");
         return;
       }
       localStorage.setItem("tf_agent_token", trimmed);
       onLogin(trimmed);
     } catch {
-      setError("Could not reach server. Is iac-agent running?");
+      setError("err: could not reach server — is IAC Agent running?");
     } finally {
       setLoading(false);
     }
@@ -40,17 +43,19 @@ export function LoginScreen({ onLogin }: Props) {
         {/* Brand */}
         <div style={{ textAlign: "center", marginBottom: 32 }}>
           <div style={{
-            width: 44, height: 44, borderRadius: 12, background: "var(--accent-subtle)",
+            width: 44, height: 44, borderRadius: "var(--radius-sm)", background: "var(--accent-subtle)",
             display: "flex", alignItems: "center", justifyContent: "center",
             margin: "0 auto 16px",
           }}>
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="16 18 22 12 16 6" />
-              <polyline points="8 6 2 12 8 18" />
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M9.5 3.5c-1.4 0-2.3.9-2.3 2.3v2.8c0 1.2-.6 1.9-1.9 2.4 1.3.5 1.9 1.2 1.9 2.4v2.8c0 1.4.9 2.3 2.3 2.3"/>
+              <path d="M14.5 3.5c1.4 0 2.3.9 2.3 2.3v2.8c0 1.2.6 1.9 1.9 2.4-1.3.5-1.9 1.2-1.9 2.4v2.8c0 1.4-.9 2.3-2.3 2.3"/>
+              <circle cx="10.3" cy="12" r="1.2" fill="var(--accent)" stroke="none"/>
+              <circle cx="13.7" cy="12" r="1.2" fill="var(--accent)" stroke="none"/>
             </svg>
           </div>
           <div style={{ fontSize: "var(--text-xl)", fontWeight: 700, color: "var(--text)", letterSpacing: "-.02em" }}>
-            iac-agent
+            IAC Agent
           </div>
           <div style={{ fontSize: "var(--text-sm)", color: "var(--text-3)", marginTop: 4 }}>
             Terraform infrastructure automation
@@ -80,14 +85,14 @@ export function LoginScreen({ onLogin }: Props) {
                 autoFocus
               />
               {error && (
-                <span style={{ fontSize: "var(--text-xs)", color: "var(--red)" }}>{error}</span>
+                <span style={{ fontSize: "var(--text-xs)", fontFamily: "var(--font-mono)", color: "var(--accent)" }}>{error}</span>
               )}
             </div>
 
             <button
               type="submit"
               className="btn btn-primary"
-              disabled={loading || !token.trim()}
+              disabled={loading}
               style={{ width: "100%", justifyContent: "center", padding: "10px 18px" }}
             >
               {loading ? "Verifying…" : "Continue →"}

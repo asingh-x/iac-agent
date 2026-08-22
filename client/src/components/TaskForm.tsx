@@ -19,6 +19,7 @@ const DEFAULT: TaskFormValues = {
 export function TaskForm({ onSubmit, loading }: Props) {
   const [form, setForm] = useState<TaskFormValues>(DEFAULT);
   const [models, setModels] = useState<ModelInfo[]>([]);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     listModels()
@@ -51,7 +52,12 @@ export function TaskForm({ onSubmit, loading }: Props) {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.task.trim() || loading) return;
+    if (loading) return;
+    if (!form.task.trim()) {
+      setError("Task description is required.");
+      return;
+    }
+    setError("");
     onSubmit(form);
   };
 
@@ -66,9 +72,10 @@ export function TaskForm({ onSubmit, loading }: Props) {
           rows={4}
           placeholder="Describe the infrastructure you need — e.g. an S3 bucket with versioning and lifecycle rules for the payments team."
           value={form.task}
-          onChange={(e) => set("task", e.target.value)}
+          onChange={(e) => { set("task", e.target.value); setError(""); }}
           disabled={loading}
         />
+        {error && <span className="form-error">{error}</span>}
       </div>
 
       {/* Jira Ticket */}
@@ -182,10 +189,10 @@ export function TaskForm({ onSubmit, loading }: Props) {
         <button
           type="submit"
           className="btn btn-primary"
-          disabled={loading || !form.task.trim()}
+          disabled={loading}
           style={{ minWidth: 148 }}
         >
-          {loading ? "Agent running…" : "Run iac-agent →"}
+          {loading ? "Agent running…" : "Run IAC Agent →"}
         </button>
         {form.dryRun && (
           <span style={{ fontSize: "var(--text-xs)", color: "var(--text-3)" }}>
@@ -215,7 +222,7 @@ function Toggle({ checked, onChange, disabled, label, hint }: ToggleProps) {
       <div
         onClick={() => !disabled && onChange(!checked)}
         style={{
-          width: 32, height: 18, borderRadius: 9, flexShrink: 0, marginTop: 2,
+          width: 32, height: 18, borderRadius: "var(--radius-sm)", flexShrink: 0, marginTop: 2,
           background: checked ? "var(--accent)" : "var(--border-strong)",
           border: `1px solid ${checked ? "var(--accent)" : "var(--border-strong)"}`,
           position: "relative",
