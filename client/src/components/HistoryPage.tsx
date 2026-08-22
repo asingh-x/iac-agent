@@ -63,7 +63,17 @@ export function HistoryPage({ onSelectTask, refreshTrigger }: Props) {
           </div>
         ) : (
           <>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
+              <colgroup>
+                <col style={{ width: 28 }} />
+                <col style={{ width: 100 }} />
+                <col />
+                <col style={{ width: 130 }} />
+                <col style={{ width: 90 }} />
+                <col style={{ width: 90 }} />
+                <col style={{ width: 70 }} />
+              </colgroup>
               <thead>
                 <tr style={{ background: "var(--surface)", borderBottom: "1px solid var(--border)" }}>
                   <Th style={{ width: 28 }} />
@@ -110,10 +120,13 @@ export function HistoryPage({ onSelectTask, refreshTrigger }: Props) {
                           <span className={`status-badge ${task.status}`}>{task.status}</span>
                         </Td>
                         <Td>
-                          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                            {isJira && <span className="input-type-badge jira">Jira</span>}
-                            <span style={{ fontSize: "var(--text-sm)", color: "var(--text)", fontWeight: 500 }}>
-                              {label.slice(0, 64)}{label.length > 64 ? "…" : ""}
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                            {isJira && <span className="input-type-badge jira" style={{ flexShrink: 0 }}>Jira</span>}
+                            <span style={{
+                              fontSize: "var(--text-sm)", color: "var(--text)", fontWeight: 500,
+                              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                            }}>
+                              {label}
                             </span>
                           </div>
                         </Td>
@@ -152,6 +165,7 @@ export function HistoryPage({ onSelectTask, refreshTrigger }: Props) {
                 })}
               </tbody>
             </table>
+            </div>
 
             {/* Pagination */}
             <div style={{
@@ -282,7 +296,7 @@ function Td({ children, muted }: { children?: React.ReactNode; muted?: boolean }
     <td style={{
       padding: "10px 14px", fontSize: "var(--text-sm)",
       color: muted ? "var(--text-3)" : "var(--text-2)",
-      whiteSpace: "nowrap", verticalAlign: "middle",
+      whiteSpace: "nowrap", verticalAlign: "middle", overflow: "hidden",
     }}>
       {children ?? "—"}
     </td>

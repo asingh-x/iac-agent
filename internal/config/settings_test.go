@@ -2,17 +2,23 @@ package config
 
 import "testing"
 
-func TestDefaults_DestructiveToolsRequireConfirmation(t *testing.T) {
+func TestDefaults_AllToolsAutoByDefault(t *testing.T) {
+	// The review gate is the PR, not a per-tool-call prompt: everything
+	// through repo scan, generate, validate, security scan, and file writes
+	// runs autonomously by default. write/edit are path-scoped to the
+	// task's working directory; bash runs on the host under this default
+	// unless sandbox_enabled is set, or the operator overrides bash back to
+	// "ask"/"confirm" in their own config.
 	cfg := Defaults()
 
-	destructive := map[string]string{
+	autoByDefault := map[string]string{
 		"bash":  cfg.Permissions.Bash,
 		"write": cfg.Permissions.Write,
 		"edit":  cfg.Permissions.Edit,
 	}
-	for tool, level := range destructive {
-		if level == "auto" {
-			t.Errorf("destructive tool %q defaults to %q — must require confirmation out of the box", tool, level)
+	for tool, level := range autoByDefault {
+		if level != "auto" {
+			t.Errorf("tool %q defaults to %q, want auto — the PR is the review gate, not a per-tool-call prompt", tool, level)
 		}
 	}
 

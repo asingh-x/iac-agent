@@ -9,6 +9,14 @@ The server is the core of the system. The client can be a web app, a CLI, or a b
 
 ---
 
+## Demo
+
+A real run against a live repo — prompt in, agent scans the repo, writes HCL, runs `terraform validate` and `checkov`, fixes what it can, and opens the PR. Real time during the interactive parts, fast-forwarded through the agent's actual thinking/streaming stretch.
+
+<video src="docs/assets/demo.mp4" controls width="720"></video>
+
+---
+
 ## Table of contents
 
 - [Why iac-agent?](#why-iac-agent)

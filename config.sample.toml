@@ -158,18 +158,18 @@ debug = false
 #   confirm (alias: ask) — pause and ask the user before each call
 #   deny    — never allow this tool
 #
-# Destructive tools (bash, write, edit) default to "confirm" — they mutate the
-# filesystem or run arbitrary shell commands, so a human approves each call
-# unless you explicitly opt into "auto" here. Everything else (read-only
-# tools, and every skill in the RepoScan -> Generate -> Validate -> SecurityScan
-# -> CreatePR pipeline) defaults to auto — "default" is the fallback for any
-# of those, and setting it to "confirm" would pause the pipeline at every
-# single skill call.
+# All tools, including bash/write/edit, default to "auto" — the review gate
+# for a generated change is the PR itself, not a per-tool-call prompt.
+# write/edit are path-scoped to the task's working directory (escapes are
+# rejected); bash runs on the host unconfirmed under this default, so set
+# sandbox_enabled = true (see docs/sandbox.md) for defense in depth in
+# production, or set bash below to "confirm" if you want a manual gate
+# before shell commands run.
 
 [permissions]
-bash    = "confirm"
-write   = "confirm"
-edit    = "confirm"
+bash    = "auto"
+write   = "auto"
+edit    = "auto"
 read    = "auto"
 glob    = "auto"
 grep    = "auto"

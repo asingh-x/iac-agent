@@ -157,17 +157,19 @@ func Defaults() *Config {
 			SandboxKubeCPUs:         "1",
 		},
 		Permissions: PermissionsConfig{
-			// Destructive tools (mutate the filesystem or run arbitrary shell
-			// commands) require confirmation by default. Read-only tools stay
-			// auto so exploration doesn't need a human in the loop. Default
-			// stays "auto" — it's the fallback for every skill (repo_scan,
-			// generate_terraform, CreatePR, ...) and other non-file tools
-			// (ask_user, agent, task, web_fetch, web_search), none of which
-			// are in the per-tool list above; "ask" here would stall the
-			// normal autonomous pipeline at every single skill invocation.
-			Bash:    "ask",
-			Write:   "ask",
-			Edit:    "ask",
+			// The product's review gate is the PR, not per-tool-call
+			// confirmation: everything from repo scan through validate,
+			// security scan, and file writes runs autonomously, and the
+			// human reviews the actual diff at the PR — same as any other
+			// GitOps change. write/edit are already path-scoped to the
+			// task's working directory (escapes are rejected). bash runs on
+			// the host unconfirmed under this default; set sandbox_enabled
+			// = true (see docs/sandbox.md) for defense in depth in
+			// production, or override bash to "ask"/"confirm" here if you
+			// want a manual gate before shell commands run.
+			Bash:    "auto",
+			Write:   "auto",
+			Edit:    "auto",
 			Read:    "auto",
 			Glob:    "auto",
 			Grep:    "auto",
