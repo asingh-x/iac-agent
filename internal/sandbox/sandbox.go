@@ -6,12 +6,12 @@
 // The Executor interface is the extension point. DockerExecutor runs each
 // command in a local Docker container (single node). K8sJobExecutor runs
 // each command as a Kubernetes Job's pod, for multi-node production
-// deployments — see docs/SANDBOX.md for what was verified against a real
+// deployments — see docs/sandbox.md for what was verified against a real
 // cluster, including the exec/tar file-staging approach it uses and the
 // NetworkPolicy enforcement caveat: not every CNI enforces it, so confirm
 // it for your own cluster rather than assuming — this project's own kind
 // test cluster's kindnetd build does enforce it, verified for real
-// 2026-08-22 (see docs/SANDBOX.md).
+// 2026-08-22 (see docs/sandbox.md).
 package sandbox
 
 import "context"

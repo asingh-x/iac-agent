@@ -59,7 +59,7 @@ PostgreSQL only (`internal/db/postgres.go`) — see `make infra` for local Postg
 
 Schema changes go in a new file under `internal/db/migrations/`, named `NNNN_description.sql` with an incrementing zero-padded number (see `0001_init.sql`, `0002_audit_events.sql`). Migrations apply automatically and idempotently on process start (`internal/db/migrate.go`) — never edit an already-committed migration file, add a new one. When adding a column to an existing table, use `ALTER TABLE ADD COLUMN` in the new migration — do not re-create tables.
 
-See `docs/ARCHITECTURE.md` for the full request flow and security boundaries.
+See `docs/architecture.md` for the full request flow and security boundaries.
 
 ## Auth
 

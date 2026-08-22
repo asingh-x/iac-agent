@@ -1,5 +1,55 @@
 # iac-agent Architecture
 
+## System diagram
+
+```mermaid
+flowchart TD
+    Browser["Browser\n(React + TypeScript)"]
+    API["HTTP API\n:8080"]
+
+    subgraph Queues["NATS JetStream — named queues"]
+        direction LR
+        QDefault["tf.tasks.default"]
+        QSecurity["tf.tasks.security"]
+        QDot["..."]
+    end
+
+    subgraph Workers["Task Runners — one goroutine per queue"]
+        direction LR
+        R1["Runner default"]
+        R2["Runner security"]
+        R3["..."]
+    end
+
+    Agent["Agent Loop\n(LLM ↔ Tools)"]
+    LLM["LLM Provider\n(Anthropic · AWS Bedrock)"]
+    DB["PostgreSQL"]
+    SSE["SSE Hub\n(live streaming)"]
+
+    subgraph Skills
+        direction LR
+        RepoScan --> Clarifier --> Generate --> Validate --> SecurityScan --> CreatePR
+    end
+
+    subgraph Tools
+        direction LR
+        Read & Write & Edit & Glob & Grep & Bash & AskUser & AgentTool
+    end
+
+    Browser -->|REST + SSE| API
+    API -->|"enqueue (queue_name)"| Queues
+    QDefault -->|pop| R1
+    QSecurity -->|pop| R2
+    Workers -->|wire + run| Agent
+    Agent <-->|streaming| LLM
+    Agent -->|invoke| Skills
+    Agent -->|invoke| Tools
+    Workers -->|publish events| SSE
+    SSE -->|EventSource| Browser
+    Workers -->|persist| DB
+    API -->|read| DB
+```
+
 ## What this is
 
 A single Go binary (`cmd/server`) that accepts a task (a prompt, or a structured
@@ -120,7 +170,7 @@ proving an in-flight, unacked delivery does *not* reappear within a short
 window after the creating pod's graceful close, but does reappear once the
 real `AckWait` elapses.
 
-One trade-off from this work, now closed (see `ROADMAP.md`): a task whose
+One trade-off from this work, now closed (see `roadmap.md`): a task whose
 NATS delivery exhausts all retry attempts (`MaxDeliver`, currently 5 — a
 genuine repeated-crash case) had no automatic path back to a terminal DB
 status under `queue_driver=nats`, since the stale-task sweep that used to
@@ -159,10 +209,25 @@ under `queue_driver=memory` too.
 - `terraform`/`tflint`/`checkov` (invoked by `ValidateSkill`/
   `SecurityScanSkill`) can optionally run inside a locked-down Docker
   container instead of directly on the host process — see
-  `docs/SANDBOX.md`. Disabled by default (`server.sandbox_enabled = false`);
+  `sandbox.md`. Disabled by default (`server.sandbox_enabled = false`);
   when enabled, `internal/sandbox.DockerExecutor` runs them with
   `--network=none`, dropped capabilities, resource limits, and a non-root
   user.
+
+## Enterprise readiness
+
+Capabilities relevant to running this for more than one trusted operator, grouped by what they actually cover today — not a roadmap, only what's shipped.
+
+- **Access control** — admin/member roles enforced by `adminMiddleware`; per-user API keys (`tfa-` + 40 hex chars), only a SHA-256 hash stored server-side, raw value shown once. Tokens can be regenerated or revoked per user without a restart.
+- **Audit trail** — every admin mutation on a user (create, update, delete, activate/deactivate, token regenerate/revoke) writes an `audit_events` row with the acting admin, the action, and the target, queryable via `GET /v1/admin/audit-log`. Self-action guards stop an admin from deleting, deactivating, or revoking their own account/token.
+- **Secrets at rest** — GitHub and Atlassian tokens in `user_settings` are AES-256-GCM encrypted, decrypted only inside `task_runner.go` immediately before use. Server config secrets (`ANTHROPIC_API_KEY`, `DB_URL`, `TF_AGENT_ADMIN_TOKEN`) are read from environment variables, not the config file — compatible with injection from Kubernetes Secrets, AWS Secrets Manager, or Vault, though none of those are wired in as a native integration.
+- **Tenant isolation for tool execution** — `terraform`/`tflint`/`checkov` can run inside a locked-down Docker container or a Kubernetes `Job`, network-isolated (`--network=none` / a deny-all-egress `NetworkPolicy`, both verified enforced — see `sandbox.md`), non-root, resource-limited. Off by default; the default is still direct host execution, appropriate for a single trusted operator.
+- **High availability** — N stateless pod replicas behind a plain load balancer, no sticky sessions required, once `queue_driver=nats` is set. SSE streams and answer/permission/cancel requests are correct regardless of which pod a request lands on (see "Data" above).
+- **Private / compliant LLM backend** — swap the `anthropic` provider for `bedrock` in config to route through a private VPC with no external rate limits, relevant for HIPAA/SOC2-constrained environments. No code change, config only.
+- **Perimeter auth** — every `/v1/*` route requires a bearer token; the server itself has no built-in SSO/SAML/OIDC, so enterprise identity (Okta, Entra ID) is expected to terminate at a reverse proxy in front of it, not inside the app.
+- **Observability** — `/healthz` reports LLM concurrency saturation and a task error-rate window; `/metrics` exposes task duration, token usage, prompt cache hit/miss, and per-tool execution counts, scrapeable by Prometheus.
+
+What's explicitly *not* here: no built-in TLS termination (front it with nginx/Caddy/ALB), no native SSO/SAML, no built-in secrets-manager client. These are documented gaps, not oversights — see [roadmap.md](roadmap.md) and the README's Known limitations table.
 
 ## Running locally
 
@@ -170,6 +235,6 @@ See `CLAUDE.md` for the up-to-date command list (`make build`, `make dev`,
 `make infra`, `make doctor`). This document explains *why* the pieces are
 shaped this way; `CLAUDE.md` is the quick-reference for *how* to build and run
 them day to day — if the two disagree, trust `CLAUDE.md` for commands and file
-an issue to fix this doc. See `docs/SANDBOX.md` for the terraform/tflint/
+an issue to fix this doc. See `sandbox.md` for the terraform/tflint/
 checkov execution sandbox specifically, including what's verified working
 today and the Kubernetes Job variant's design (not implemented).

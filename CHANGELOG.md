@@ -23,7 +23,7 @@ shared NATS work-queue consumer out from under every other pod
 approve/deny instead of auto-approving), an LLM provider circuit breaker,
 path-scoping on file tools, a repo-index cache to avoid re-parsing an
 unchanged repo every task (saves CPU/wall-clock, not LLM tokens — see
-`docs/BENCHMARKS.md`), graceful shutdown drain with a real `-race`-caught
+`docs/benchmarks.md`), graceful shutdown drain with a real `-race`-caught
 fix, per-query Postgres retry on transient connection errors, a bounded LLM
 concurrency semaphore (previously could block forever), per-user semaphore
 cleanup, an age-based reconciliation backstop for tasks that never reach a
@@ -39,7 +39,7 @@ capabilities, non-root, resource limits) instead of directly on the host —
 opt-in via `sandbox_enabled`, off by default. A Kubernetes `Job`-based
 executor for multi-node deployments is also built and verified for real
 against a live cluster (Job/pod lifecycle, file staging, guaranteed cleanup,
-a `NetworkPolicy` confirmed actually enforced) — see `docs/SANDBOX.md`. The
+a `NetworkPolicy` confirmed actually enforced) — see `docs/sandbox.md`. The
 sandbox image itself is now published, multi-arch (amd64+arm64), to
 `ghcr.io/asingh-x/iac-agent/sandbox:latest` — the new default for
 `sandbox_image`, so both backends work out of the box with no local build
@@ -51,7 +51,7 @@ dumping raw JSON — also fixed a bug where a non-zero exit code (the normal
 outcome when either tool finds real issues) discarded valid findings
 entirely in favor of a useless error message.
 
-See `ROADMAP.md` for what's still open.
+See `docs/roadmap.md` for what's still open.
 
 ## [0.1.0] — 2026-04-03
 

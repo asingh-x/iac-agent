@@ -17,7 +17,7 @@ package skills
 // instead of a git commit sha removes that noise and isolates the number
 // that's actually interesting here.
 //
-// See docs/BENCHMARKS.md for how to run this and what the numbers mean.
+// See docs/benchmarks.md for how to run this and what the numbers mean.
 
 import (
 	"context"

@@ -9,7 +9,7 @@ package tfscan
 // spread across enough files that the file-walk-and-regex cost is
 // measurable, roughly the scale of a real multi-module Terraform project.
 //
-// See docs/BENCHMARKS.md for how to run this and what the numbers mean.
+// See docs/benchmarks.md for how to run this and what the numbers mean.
 
 import (
 	"fmt"

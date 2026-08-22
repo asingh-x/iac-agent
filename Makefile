@@ -151,7 +151,7 @@ infra-clean:
 ## internal/sandbox.DockerExecutor when server.sandbox_enabled = true
 sandbox-build:
 	docker build -f docker/sandbox/Dockerfile -t $(SANDBOX_IMAGE) .
-	@echo "✓ built $(SANDBOX_IMAGE) — see docs/SANDBOX.md"
+	@echo "✓ built $(SANDBOX_IMAGE) — see docs/sandbox.md"
 
 # Doctor
 doctor:
@@ -168,5 +168,5 @@ doctor:
 	@echo -n "GITHUB_TOKEN:  "; [ -n "$$GITHUB_TOKEN" ] && echo "set" || echo "not set"
 	@echo -n "Postgres:      "; docker exec $(PG_CONTAINER) pg_isready -U $(PG_USER) 2>/dev/null && echo "running" || echo "not running (make infra)"
 	@echo -n "NATS:          "; docker inspect -f '{{.State.Status}}' $(NATS_CONTAINER) 2>/dev/null || echo "not running (make infra)"
-	@echo -n "sandbox image: "; docker image inspect $(SANDBOX_IMAGE) >/dev/null 2>&1 && echo "built locally ($(SANDBOX_IMAGE))" || echo "not built locally — fine, sandbox_enabled = true pulls the published image by default; run 'make sandbox-build' only if you want a local dev-loop build (see docs/SANDBOX.md)"
+	@echo -n "sandbox image: "; docker image inspect $(SANDBOX_IMAGE) >/dev/null 2>&1 && echo "built locally ($(SANDBOX_IMAGE))" || echo "not built locally — fine, sandbox_enabled = true pulls the published image by default; run 'make sandbox-build' only if you want a local dev-loop build (see docs/sandbox.md)"
 	@echo "=== done ==="

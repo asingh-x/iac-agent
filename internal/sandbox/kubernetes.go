@@ -56,7 +56,7 @@ const (
 
 	// networkPolicyName is the deny-all-egress NetworkPolicy K8sJobExecutor
 	// ensures exists in its namespace — the closest cluster-level
-	// equivalent to DockerExecutor's --network=none. See docs/SANDBOX.md
+	// equivalent to DockerExecutor's --network=none. See docs/sandbox.md
 	// for what was verified about this cluster's CNI actually enforcing it.
 	networkPolicyName = "iac-agent-sandbox-deny-egress"
 
@@ -73,7 +73,7 @@ const (
 // deliberately not cluster-wide.
 //
 // Containment properties, mirroring DockerExecutor where Kubernetes has a
-// direct equivalent (see docs/SANDBOX.md for what was actually verified
+// direct equivalent (see docs/sandbox.md for what was actually verified
 // against a real cluster, including the NetworkPolicy enforcement caveat):
 //   - PodSecurityContext/SecurityContext RunAsNonRoot + RunAsUser: no root
 //     inside the container, the same posture as DockerExecutor never
@@ -87,19 +87,19 @@ const (
 //     containment property if the cluster's CNI enforces NetworkPolicy —
 //     confirm this for your cluster rather than assuming either way. This
 //     project's own kind test cluster's kindnetd build does enforce it,
-//     confirmed via a real A/B egress probe (see docs/SANDBOX.md, verified
+//     confirmed via a real A/B egress probe (see docs/sandbox.md, verified
 //     for real 2026-08-22).
 //   - The Job (and therefore its Pod) is always deleted on the way out,
 //     regardless of how Run exits — the equivalent of DockerExecutor's
 //     --rm + `docker rm -f` backstop, just at cluster scope.
 //
 // File staging: rather than the PVC/object-storage round trip
-// docs/SANDBOX.md originally sketched, Run stages workDir into the running
+// docs/sandbox.md originally sketched, Run stages workDir into the running
 // pod by streaming a tar archive over the pod exec API (the same mechanism
 // `kubectl cp` uses under the hood via client-go's remotecommand package) —
 // this needs no extra cluster infrastructure (no PVC, no object storage
 // round trip) and was verified working against a real cluster. See
-// docs/SANDBOX.md for the full writeup of why this was chosen over the
+// docs/sandbox.md for the full writeup of why this was chosen over the
 // PVC/object-storage alternatives.
 //
 // The actual command (name/args) is also run via pod exec rather than as
@@ -467,7 +467,7 @@ func (k *K8sJobExecutor) execStream(ctx context.Context, podName string, command
 // selecting every pod in the namespace and denying all egress — the closest
 // cluster-level equivalent to DockerExecutor's --network=none. This is a
 // real containment property only if the cluster's CNI enforces
-// NetworkPolicy; see docs/SANDBOX.md for what was verified for the kind
+// NetworkPolicy; see docs/sandbox.md for what was verified for the kind
 // cluster this was built against (its kindnetd build does enforce it,
 // confirmed via a real A/B egress probe).
 func (k *K8sJobExecutor) ensureDenyEgressNetworkPolicy(ctx context.Context) error {

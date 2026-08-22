@@ -36,7 +36,7 @@ queue_buffer = 500
 
 # Run terraform/tflint/checkov (invoked by the Validate and SecurityScan
 # skills) inside a locked-down Docker container instead of directly on the
-# host. See docs/SANDBOX.md. Requires a local Docker daemon — pulls the
+# host. See docs/sandbox.md. Requires a local Docker daemon — pulls the
 # published sandbox image automatically, no local build required (run
 # `make sandbox-build` instead if you want a local dev-loop build).
 # Override with env var: TF_AGENT_SANDBOX_ENABLED=true
@@ -59,7 +59,7 @@ sandbox_enabled = false
 
 # Which sandbox.Executor backend sandbox_enabled wires up: "docker" (local
 # Docker daemon, single node) or "kubernetes" (a real cluster, multi-node —
-# see docs/SANDBOX.md for what this needs and what was verified).
+# see docs/sandbox.md for what this needs and what was verified).
 # Override with env var: TF_AGENT_SANDBOX_BACKEND=kubernetes
 # Default: "docker"
 # sandbox_backend = "docker"

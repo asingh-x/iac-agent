@@ -69,59 +69,15 @@ The next generation of AI tooling isn't smarter chat. It's specialized skills, a
 | **Multi-provider LLM** | Anthropic API or AWS Bedrock — swap in config |
 | **Configurable permissions** | `auto` / `confirm` / `deny` policy for destructive tool calls |
 | **Prometheus metrics** | Task duration, token usage, throughput at `/metrics` |
-| **Multi-replica safe** | Run N pods behind a plain load balancer — no sticky sessions. SSE streaming and answer/permission/cancel requests work no matter which pod a request lands on (see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)) |
+| **Multi-replica safe** | Run N pods behind a plain load balancer — no sticky sessions. SSE streaming and answer/permission/cancel requests work no matter which pod a request lands on (see [docs/architecture.md](docs/architecture.md)) |
+| **Sandboxed execution** | Optional Docker or Kubernetes backend runs `terraform`/`tflint`/`checkov` network-isolated, non-root, resource-limited — for untrusted multi-tenant use (see [docs/sandbox.md](docs/sandbox.md)) |
+| **Audit trail** | Every admin action (user create/update/delete/activate/token regen) is logged with actor, action, and target — queryable at `/v1/admin/audit-log` |
 
 ---
 
 ## Architecture
 
-```mermaid
-flowchart TD
-    Browser["Browser\n(React + TypeScript)"]
-    API["HTTP API\n:8080"]
-
-    subgraph Queues["NATS JetStream — named queues"]
-        direction LR
-        QDefault["tf.tasks.default"]
-        QSecurity["tf.tasks.security"]
-        QDot["..."]
-    end
-
-    subgraph Workers["Task Runners — one goroutine per queue"]
-        direction LR
-        R1["Runner default"]
-        R2["Runner security"]
-        R3["..."]
-    end
-
-    Agent["Agent Loop\n(LLM ↔ Tools)"]
-    LLM["LLM Provider\n(Anthropic · AWS Bedrock)"]
-    DB["PostgreSQL"]
-    SSE["SSE Hub\n(live streaming)"]
-
-    subgraph Skills
-        direction LR
-        RepoScan --> Clarifier --> Generate --> Validate --> SecurityScan --> CreatePR
-    end
-
-    subgraph Tools
-        direction LR
-        Read & Write & Edit & Glob & Grep & Bash & AskUser & AgentTool
-    end
-
-    Browser -->|REST + SSE| API
-    API -->|"enqueue (queue_name)"| Queues
-    QDefault -->|pop| R1
-    QSecurity -->|pop| R2
-    Workers -->|wire + run| Agent
-    Agent <-->|streaming| LLM
-    Agent -->|invoke| Skills
-    Agent -->|invoke| Tools
-    Workers -->|publish events| SSE
-    SSE -->|EventSource| Browser
-    Workers -->|persist| DB
-    API -->|read| DB
-```
+The system diagram, request flow, data model, security boundaries, and enterprise readiness (RBAC, audit trail, sandboxed execution, HA) live in [docs/architecture.md](docs/architecture.md).
 
 ---
 
@@ -416,7 +372,7 @@ Admin-only:
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for what's still open, and [CHANGELOG.md](CHANGELOG.md) for what's already shipped.
+See [docs/roadmap.md](docs/roadmap.md) for what's still open, and [CHANGELOG.md](CHANGELOG.md) for what's already shipped.
 
 ---
 
@@ -430,7 +386,7 @@ See [ROADMAP.md](ROADMAP.md) for what's still open, and [CHANGELOG.md](CHANGELOG
 | **IaC runtime** | `terraform` CLI only. OpenTofu and other Terraform forks are not supported. |
 | **Security scanner** | `checkov` only. Tfsec, Terrascan, and other scanners are not integrated. |
 | **LLM provider** | Claude models only (Anthropic API or AWS Bedrock). OpenAI, Gemini, and others are not supported. |
-| **Toolchain** | `terraform`, `tflint`, and `checkov` must be installed on the host. The agent does not sandbox these binaries. |
+| **Toolchain** | `terraform`, `tflint`, and `checkov` must be installed on the host, unless the optional sandbox is enabled (`sandbox_enabled = true` — Docker or Kubernetes backend, see [docs/sandbox.md](docs/sandbox.md)). Direct host execution is still the default. |
 | **TLS** | No built-in TLS. Requires a terminating reverse proxy (nginx, Caddy, ALB) in production. |
 
 ---
@@ -445,7 +401,7 @@ If you're building agentic systems for DevOps or IaC, or just want to explore �
 
 Contributions are welcome. Please open a PR — see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-See [CHANGELOG.md](CHANGELOG.md) for release history, [ROADMAP.md](ROADMAP.md) for planned work, and [SECURITY.md](SECURITY.md) for reporting vulnerabilities.
+See [CHANGELOG.md](CHANGELOG.md) for release history, [docs/roadmap.md](docs/roadmap.md) for planned work, and [SECURITY.md](SECURITY.md) for reporting vulnerabilities.
 
 ## License
 

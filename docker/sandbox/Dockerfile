@@ -1,6 +1,6 @@
 # Sandbox image for internal/sandbox.DockerExecutor — the container that
 # terraform/tflint/checkov actually run inside of when
-# server.sandbox_enabled = true (see docs/SANDBOX.md).
+# server.sandbox_enabled = true (see docs/sandbox.md).
 #
 # This is NOT the iac-agent server image (see the top-level Dockerfile for
 # that). This image never runs the server; it only holds the three CLI

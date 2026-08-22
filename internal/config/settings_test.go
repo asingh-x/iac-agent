@@ -79,7 +79,7 @@ func TestDefaults_FallbackStaysAuto(t *testing.T) {
 
 // TestDefaults_SandboxDisabledByDefault guards against ever flipping the
 // sandbox on by default — it must stay opt-in so `make run`/local dev works
-// unchanged for anyone without Docker running (see docs/SANDBOX.md).
+// unchanged for anyone without Docker running (see docs/sandbox.md).
 func TestDefaults_SandboxDisabledByDefault(t *testing.T) {
 	cfg := Defaults()
 	if cfg.Server.SandboxEnabled {

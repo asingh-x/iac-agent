@@ -57,7 +57,7 @@ type ServerConfig struct {
 	// SandboxBackend selects which sandbox.Executor implementation
 	// SandboxEnabled wires up: "docker" (default) runs sandbox.DockerExecutor
 	// against a local Docker daemon; "kubernetes" runs sandbox.K8sJobExecutor
-	// against a real cluster (see docs/SANDBOX.md). Any other value falls
+	// against a real cluster (see docs/sandbox.md). Any other value falls
 	// back to "docker" — SandboxEnabled's existing behavior is unchanged for
 	// anyone who never sets this field.
 	SandboxBackend string `toml:"sandbox_backend"`

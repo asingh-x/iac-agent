@@ -9,7 +9,7 @@ package server
 // fakeLocalHandler and natsConnForControlTest from control_relay_test.go,
 // which are unexported and live in this package.
 //
-// See docs/BENCHMARKS.md for how to run these and what the numbers mean.
+// See docs/benchmarks.md for how to run these and what the numbers mean.
 
 import (
 	"context"

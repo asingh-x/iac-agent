@@ -7,7 +7,7 @@ package server
 // primitives (sync.RWMutex on Hub.channels/owned, the per-task maps on
 // Runner) hold up under real contention, not just the light concurrency the
 // rest of the unit tests exercise. Run with -race; also run at -count=2 (see
-// docs/BENCHMARKS.md) to shake out anything timing-dependent.
+// docs/benchmarks.md) to shake out anything timing-dependent.
 //
 // In-package (not server_test) so the Runner-side test can seed r.answers/
 // r.permissions/r.cancels directly, the same way multireplica_e2e_test.go's

@@ -7,7 +7,7 @@
 task's working directory. That gives arbitrary LLM-generated HCL and
 arbitrary task input the same privileges and network access as the tf-agent
 server process itself — acceptable for a single trusted operator, a real gap
-once multiple untrusted users can submit tasks. This is the piece ROADMAP.md
+once multiple untrusted users can submit tasks. This is the piece roadmap.md
 tracks as the sandbox item under Deployment & Operations.
 
 ## What's built (Docker, local/single-node)

@@ -23,7 +23,7 @@ import (
 //
 // Override TF_AGENT_K8S_TEST_NAMESPACE / TF_AGENT_K8S_TEST_IMAGE to point at
 // a different pre-existing namespace/image; defaults match this repo's own
-// verification run (see docs/SANDBOX.md) against a kind cluster where the
+// verification run (see docs/sandbox.md) against a kind cluster where the
 // real iac-agent-sandbox image couldn't be loaded onto the (amd64) nodes from
 // this (arm64) dev machine, so a small already-pullable stand-in image is
 // used instead — K8sJobExecutor's mechanics don't depend on which image runs.
@@ -196,7 +196,7 @@ func TestK8sJobExecutor_CancelCleansUpNoLeak(t *testing.T) {
 // every pod in the namespace, denies all egress) — a stable, cluster-CNI-
 // independent correctness check. Whether the CNI actually *enforces* it is
 // a separate, cluster-specific question answered manually and documented in
-// docs/SANDBOX.md (this cluster's CNI, kindnetd, does enforce it — confirmed
+// docs/sandbox.md (this cluster's CNI, kindnetd, does enforce it — confirmed
 // via a real A/B egress probe).
 func TestK8sJobExecutor_NetworkPolicyStructure(t *testing.T) {
 	e := requireK8s(t)

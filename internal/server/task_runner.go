@@ -961,7 +961,7 @@ func (r *Runner) wireAgent(ctx context.Context, item queue.Item) (*agent.Agent, 
 	toolReg.Register(tools.NewAgentTool(r.buildSubAgentRunner(cwd)))
 
 	// sandboxExecutor is nil (host-exec fallback) unless sandbox_enabled is
-	// set — see internal/sandbox and docs/SANDBOX.md. Defaulting to nil keeps
+	// set — see internal/sandbox and docs/sandbox.md. Defaulting to nil keeps
 	// ValidateSkill/SecurityScanSkill behavior byte-for-byte unchanged for
 	// anyone not opting into sandboxing. sandbox_backend selects which
 	// Executor implementation backs it; anything other than "kubernetes"
