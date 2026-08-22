@@ -50,7 +50,7 @@ dev:
 dev-ui:
 	cd client && npm install && npm run dev
 
-## run-server — runs the Go server directly (SQLite, memory queue)
+## run-server — runs the Go server directly (Postgres, memory queue)
 run-server:
 	go run ./cmd/server $(ARGS)
 

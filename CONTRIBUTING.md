@@ -10,8 +10,8 @@
 ## Development setup
 
 ```bash
-git clone https://github.com/tf-agent/tf-agent
-cd tf-agent
+git clone https://github.com/asingh-x/iac-agent
+cd iac-agent
 
 # Install client dependencies
 cd client && npm install && cd ..

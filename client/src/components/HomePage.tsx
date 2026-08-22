@@ -36,14 +36,14 @@ export function HomePage({ onSubmit, loading, onNavigate }: Props) {
           fontSize: 28, fontWeight: 700, color: "var(--text)",
           letterSpacing: "-.03em", lineHeight: 1.2, marginBottom: 10,
         }}>
-          Generate Terraform<br />infrastructure, instantly.
+          Create your PR now.
         </h1>
 
         <p style={{
           fontSize: "var(--text-base)", color: "var(--text-3)",
           lineHeight: 1.7, maxWidth: 480, marginBottom: 20,
         }}>
-          Describe what you need. tf-agent scans your repos for patterns,
+          Describe what you need. iac-agent scans your repos for patterns,
           writes HCL, runs <code style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--text-2)" }}>terraform validate</code>,
           and opens a pull request — all autonomously.
         </p>

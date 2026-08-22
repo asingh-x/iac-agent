@@ -13,6 +13,13 @@ import type { TaskFormValues, HistoryTask, UserInfo } from "./types";
 
 type View = "landing" | "form" | "history" | "settings";
 
+const VIEW_TITLE: Record<View, string> = {
+  landing:  "Home",
+  form:     "New task",
+  history:  "Recent tasks",
+  settings: "Settings",
+};
+
 const SS_TASK = "tf_selected_task_id";
 
 const HASH_TO_VIEW: Record<string, View> = {
@@ -47,7 +54,10 @@ export default function App() {
     return id ? { id, status: "done", input_text: "", created_at: "" } : null;
   });
   const [view, setView] = useState<View>(viewFromHash);
-  const { state, output, prUrl, pendingQuestion, run, reconnect, sendAnswer, cancel, reset } = useTaskRunner();
+  const {
+    state, output, prUrl, pendingQuestion, pendingPermission,
+    run, reconnect, sendAnswer, respondToPermission, cancel, reset,
+  } = useTaskRunner();
   const [lastForm, setLastForm] = useState<TaskFormValues | null>(null);
 
   // Sync view when user navigates with browser back/forward
@@ -135,16 +145,18 @@ export default function App() {
 
       <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, overflow: "hidden" }}>
         <div className="topbar">
-          <div className="topbar-title">tf-agent</div>
+          <div className="topbar-title">{showOutput || showDetail ? "Task" : VIEW_TITLE[view]}</div>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            {isRunning && <span className="chip chip-running">Agent running</span>}
-            {state === "done" && <span className="chip chip-done">Done</span>}
-            {state === "error" && <span className="chip chip-failed">Failed</span>}
+            {/* The output panel already shows task status prominently while
+                you're looking at it — only surface it here as an ambient
+                indicator when a task is running in the background, e.g.
+                while you've navigated to History or Settings. */}
+            {!showOutput && isRunning && <span className="chip chip-running">Agent running</span>}
           </div>
         </div>
 
         <main style={{ flex: 1, overflowY: "auto", padding: "40px 48px" }}>
-          <div style={{ maxWidth: showHistory ? 960 : showSettings ? "none" : 680, margin: "0 auto" }}>
+          <div style={{ maxWidth: showHistory ? 960 : showSettings ? "none" : showLanding ? 760 : 680, margin: "0 auto" }}>
 
             {showLanding && <HeroPage onNavigate={(page) => nav(page as View)()} />}
 
@@ -168,7 +180,9 @@ export default function App() {
                 state={state}
                 prUrl={prUrl}
                 pendingQuestion={pendingQuestion}
+                pendingPermission={pendingPermission}
                 onAnswer={sendAnswer}
+                onPermissionResponse={respondToPermission}
                 onRetry={lastForm ? handleRetry : undefined}
                 onCancel={cancel}
               />

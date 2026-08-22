@@ -185,7 +185,7 @@ export function TaskForm({ onSubmit, loading }: Props) {
           disabled={loading || !form.task.trim()}
           style={{ minWidth: 148 }}
         >
-          {loading ? "Agent running…" : "Run tf-agent →"}
+          {loading ? "Agent running…" : "Run iac-agent →"}
         </button>
         {form.dryRun && (
           <span style={{ fontSize: "var(--text-xs)", color: "var(--text-3)" }}>

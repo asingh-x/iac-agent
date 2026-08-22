@@ -11,20 +11,22 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Port               int    `toml:"port"`
-	PostgresURL        string `toml:"postgres_url"` // postgres://user:pass@host:5432/db?sslmode=disable
-	QueueDriver        string `toml:"queue_driver"` // memory (default) | nats
-	NatsURL            string `toml:"nats_url"`     // nats://host:4222
-	LLMConcurrency     int    `toml:"llm_concurrency"`
-	PerUserConcurrency int    `toml:"per_user_concurrency"`
-	QueueBuffer        int    `toml:"queue_buffer"`
+	Port                int    `toml:"port"`
+	PostgresURL         string `toml:"postgres_url"` // postgres://user:pass@host:5432/db?sslmode=disable
+	QueueDriver         string `toml:"queue_driver"` // memory (default) | nats
+	NatsURL             string `toml:"nats_url"`     // nats://host:4222
+	LLMConcurrency      int    `toml:"llm_concurrency"`
+	PerUserConcurrency  int    `toml:"per_user_concurrency"`
+	QueueBuffer         int    `toml:"queue_buffer"`
+	NATSMaxMsgs         int    `toml:"nats_max_msgs"`         // max total backlog across all named NATS queues sharing the TF_AGENT stream (backpressure); default 5000
+	ShutdownGracePeriod int    `toml:"shutdown_grace_period"` // seconds; default 60. How long to wait for in-flight tasks to finish before force-cancelling on shutdown.
 }
 
 type ProviderConfig struct {
-	Name      string            `toml:"name"`
-	Model     string            `toml:"model"`
-	Anthropic AnthropicConfig   `toml:"anthropic"`
-	Bedrock   BedrockConfig     `toml:"bedrock"`
+	Name      string          `toml:"name"`
+	Model     string          `toml:"model"`
+	Anthropic AnthropicConfig `toml:"anthropic"`
+	Bedrock   BedrockConfig   `toml:"bedrock"`
 }
 
 type AnthropicConfig struct {
@@ -41,6 +43,7 @@ type AgentConfig struct {
 	MaxTokens           int  `toml:"max_tokens"`
 	Debug               bool `toml:"debug"`
 	WaitForInputTimeout int  `toml:"wait_for_input_timeout"` // seconds; default 604800 (7 days)
+	MaxTaskDuration     int  `toml:"max_task_duration"`      // seconds; default 1800 (30 minutes)
 }
 
 type PermissionsConfig struct {
@@ -50,6 +53,7 @@ type PermissionsConfig struct {
 	Read    string `toml:"read"`
 	Glob    string `toml:"glob"`
 	Grep    string `toml:"grep"`
+	Ls      string `toml:"ls"`
 	Default string `toml:"default"`
 }
 
@@ -79,20 +83,32 @@ func Defaults() *Config {
 			MaxTokens:           8192,
 			Debug:               false,
 			WaitForInputTimeout: 7 * 24 * 3600, // 7 days in seconds
+			MaxTaskDuration:     30 * 60,       // 30 minutes in seconds
 		},
 		Server: ServerConfig{
-			Port:               8080,
-			LLMConcurrency:     10,
-			PerUserConcurrency: 3,
-			QueueBuffer:        500,
+			Port:                8080,
+			LLMConcurrency:      10,
+			PerUserConcurrency:  3,
+			QueueBuffer:         500,
+			NATSMaxMsgs:         5000, // NATS is durable and meant to hold more backlog than the in-memory QueueBuffer (500); keep in sync with queue.DefaultNATSMaxMsgs
+			ShutdownGracePeriod: 60,
 		},
 		Permissions: PermissionsConfig{
-			Bash:    "auto",
-			Write:   "auto",
-			Edit:    "auto",
+			// Destructive tools (mutate the filesystem or run arbitrary shell
+			// commands) require confirmation by default. Read-only tools stay
+			// auto so exploration doesn't need a human in the loop. Default
+			// stays "auto" — it's the fallback for every skill (repo_scan,
+			// generate_terraform, CreatePR, ...) and other non-file tools
+			// (ask_user, agent, task, web_fetch, web_search), none of which
+			// are in the per-tool list above; "ask" here would stall the
+			// normal autonomous pipeline at every single skill invocation.
+			Bash:    "ask",
+			Write:   "ask",
+			Edit:    "ask",
 			Read:    "auto",
 			Glob:    "auto",
 			Grep:    "auto",
+			Ls:      "auto",
 			Default: "auto",
 		},
 	}

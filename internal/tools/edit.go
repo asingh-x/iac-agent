@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -66,11 +65,10 @@ func (t *EditTool) Execute(_ context.Context, input json.RawMessage) (string, er
 		return "", fmt.Errorf("edit: editing %q is not allowed", args.FilePath)
 	}
 
-	path := args.FilePath
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(t.cwd, path)
+	path, err := resolveScoped(t.cwd, args.FilePath)
+	if err != nil {
+		return "", fmt.Errorf("edit: %w", err)
 	}
-	path = filepath.Clean(path)
 
 	data, err := os.ReadFile(path)
 	if err != nil {

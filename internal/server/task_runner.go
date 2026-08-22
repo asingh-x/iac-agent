@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tf-agent/tf-agent/internal/agent"
@@ -38,11 +40,66 @@ type Runner struct {
 	answerMu sync.Mutex
 	answers  map[string]chan string // taskID → pending answer channel
 
+	permissionMu sync.Mutex
+	permissions  map[string]chan bool // taskID → pending permission-response channel
+
 	cancelMu sync.Mutex
 	cancels  map[string]context.CancelFunc // taskID → cancel func
 
 	userSemMu sync.Mutex
 	userSems  map[string]chan struct{} // userID → per-user semaphore
+
+	// inFlight tracks running task goroutines, for graceful shutdown.
+	// draining guards a real race: sync.WaitGroup forbids a concurrent Add
+	// happening around a Wait when the counter could be zero. dispatchMu
+	// makes "check draining, then Add" atomic with respect to Shutdown
+	// setting draining — Shutdown's Lock() cannot proceed (and therefore
+	// Wait cannot be called) until any in-progress Add under RLock has
+	// completed, which is what makes this safe.
+	dispatchMu sync.RWMutex
+	draining   bool
+	inFlight   sync.WaitGroup
+}
+
+// Shutdown stops accepting the effects of new task work and waits for
+// in-flight tasks to finish naturally. If ctx is done before all in-flight
+// tasks complete, it force-cancels every still-running task (the same
+// mechanism CancelTask uses) so the process can exit rather than hang forever
+// on a stuck task.
+//
+// Callers must stop the queue's Pop loop(s) (e.g. by cancelling the context
+// passed to StartQueue) before calling Shutdown, so no new tasks start during
+// the drain.
+func (r *Runner) Shutdown(ctx context.Context) {
+	// Setting draining under the write lock cannot proceed until any
+	// in-progress StartQueue dispatch (holding the read lock around its
+	// check-then-Add) has fully completed its Add call. That ordering is
+	// what makes it safe to call inFlight.Wait() below: sync.WaitGroup
+	// forbids a concurrent Add racing a Wait when the counter could be
+	// zero, and this guarantees no Add can start after this point.
+	r.dispatchMu.Lock()
+	r.draining = true
+	r.dispatchMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		r.inFlight.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return
+	case <-ctx.Done():
+		r.logger.Warn("shutdown grace period expired, cancelling in-flight tasks")
+		r.cancelMu.Lock()
+		for taskID, cancel := range r.cancels {
+			r.logger.Warn("force-cancelling task at shutdown", "task_id", taskID)
+			cancel()
+		}
+		r.cancelMu.Unlock()
+		<-done // wait for the now-cancelled tasks to actually finish persisting their result
+	}
 }
 
 // CancelTask cancels a running task. Returns an error if the task is not running.
@@ -74,22 +131,103 @@ func (r *Runner) SendAnswer(taskID, answer string) error {
 	}
 }
 
+// SendPermissionResponse delivers a user's allow/deny decision to a task
+// that is currently paused asking whether a tool may run. Returns an error
+// if the task is not currently waiting on a permission decision.
+func (r *Runner) SendPermissionResponse(taskID string, allow bool) error {
+	r.permissionMu.Lock()
+	ch, ok := r.permissions[taskID]
+	r.permissionMu.Unlock()
+	if !ok {
+		return fmt.Errorf("task %s is not waiting for a permission decision", taskID)
+	}
+	select {
+	case ch <- allow:
+		return nil
+	default:
+		return fmt.Errorf("task %s permission channel full", taskID)
+	}
+}
+
+// awaitPermission pauses the task on a "confirm this tool call" prompt: it
+// publishes a permission_request SSE event and blocks until the user
+// responds via SendPermissionResponse, the wait times out (denies, since
+// timing out on a destructive-tool confirmation should not silently allow
+// it), or the task's context is cancelled (denies).
+func (r *Runner) awaitPermission(ctx context.Context, taskID string, req *agent.PermissionRequest, waitTimeoutSeconds int, ch <-chan bool, waitingForInput *int32) bool {
+	atomic.StoreInt32(waitingForInput, 1)
+	defer atomic.StoreInt32(waitingForInput, 0)
+
+	preview := previewToolInput(req.Input)
+
+	if err := r.store.UpdateTaskStatus(ctx, taskID, "waiting_for_input"); err != nil {
+		r.logger.Error("failed to update task status", "task_id", taskID, "status", "waiting_for_input", "err", err)
+	}
+	if err := r.store.UpdateTaskPendingQuestion(ctx, taskID, fmt.Sprintf("Approve %s: %s", req.ToolName, preview)); err != nil {
+		r.logger.Error("failed to update task pending question", "task_id", taskID, "err", err)
+	}
+	r.hub.Publish(taskID, ServerEvent{Type: "permission_request", Tool: req.ToolName, Text: preview})
+
+	defer func() {
+		if err := r.store.UpdateTaskPendingQuestion(ctx, taskID, ""); err != nil {
+			r.logger.Error("failed to clear task pending question", "task_id", taskID, "err", err)
+		}
+		if err := r.store.UpdateTaskStatus(ctx, taskID, "running"); err != nil {
+			r.logger.Error("failed to update task status", "task_id", taskID, "status", "running", "err", err)
+		}
+		r.hub.Publish(taskID, ServerEvent{Type: "status", Status: "running"})
+	}()
+
+	select {
+	case allow := <-ch:
+		return allow
+	case <-time.After(time.Duration(waitTimeoutSeconds) * time.Second):
+		r.logger.Warn("permission request timed out, denying", "task_id", taskID, "tool", req.ToolName)
+		return false
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// previewToolInput renders a short human-readable preview of a tool call's
+// input for a permission prompt: the most relevant field for tools with a
+// well-known shape (the command being run, the file being touched, ...),
+// falling back to raw (truncated) JSON for anything else.
+func previewToolInput(input json.RawMessage) string {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(input, &fields); err == nil {
+		for _, key := range []string{"command", "file_path", "path", "pattern"} {
+			if raw, ok := fields[key]; ok {
+				var s string
+				if json.Unmarshal(raw, &s) == nil && s != "" {
+					return s
+				}
+			}
+		}
+	}
+	if len(input) > 200 {
+		return string(input[:200]) + "..."
+	}
+	return string(input)
+}
+
 func NewRunner(hub *Hub, store db.Store, q queue.Queue, provider llm.Provider, cfg *config.Config, logger *slog.Logger) *Runner {
 	concurrency := cfg.Server.LLMConcurrency
 	if concurrency <= 0 {
 		concurrency = 10
 	}
 	return &Runner{
-		hub:      hub,
-		store:    store,
-		queue:    q,
-		provider: provider,
-		cfg:      cfg,
-		sem:      make(chan struct{}, concurrency),
-		logger:   logger,
-		answers:  make(map[string]chan string),
-		cancels:  make(map[string]context.CancelFunc),
-		userSems: make(map[string]chan struct{}),
+		hub:         hub,
+		store:       store,
+		queue:       q,
+		provider:    provider,
+		cfg:         cfg,
+		sem:         make(chan struct{}, concurrency),
+		logger:      logger,
+		answers:     make(map[string]chan string),
+		permissions: make(map[string]chan bool),
+		cancels:     make(map[string]context.CancelFunc),
+		userSems:    make(map[string]chan struct{}),
 	}
 }
 
@@ -101,24 +239,83 @@ func (r *Runner) Start(ctx context.Context) {
 
 // StartQueue blocks, continuously pulling from q.
 // Call in a goroutine for each named queue to give each its own worker loop.
+//
+// ctx only governs the pop loop itself: cancelling it stops picking up new
+// work, but does NOT cancel tasks already dispatched to run() — those get an
+// independent lifetime so a shutdown signal drains in-flight work instead of
+// killing it outright. See Shutdown.
 func (r *Runner) StartQueue(ctx context.Context, q queue.Queue) {
 	for {
-		item, err := q.Pop(ctx)
+		item, delivery, err := q.Pop(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
 			continue
 		}
-		go r.run(ctx, item)
+		// Check-then-Add under the read lock: see the comment on Shutdown for
+		// why this makes Add-vs-Wait race-free rather than just "unlikely".
+		r.dispatchMu.RLock()
+		if r.draining {
+			r.dispatchMu.RUnlock()
+			// Shutdown has begun: don't start new work. Nak so a durable
+			// queue (NATS) redelivers this to another worker/restart rather
+			// than losing it; a no-op for the in-memory queue, which is
+			// already documented as lossy on restart.
+			if err := delivery.Nak(); err != nil {
+				r.logger.Error("failed to nak task during shutdown", "task_id", item.TaskID, "err", err)
+			}
+			continue
+		}
+		r.inFlight.Add(1)
+		r.dispatchMu.RUnlock()
+		go func() {
+			defer r.inFlight.Done()
+			r.run(context.Background(), item, delivery)
+		}()
 	}
 }
 
-func (r *Runner) run(ctx context.Context, item queue.Item) {
+// heartbeatInterval controls how often Delivery.Extend is called while a task
+// is running, so a long-running task isn't redelivered out from under an
+// active worker (NATS's AckWait is 5 minutes; this must stay well under that).
+const heartbeatInterval = 2 * time.Minute
+
+func (r *Runner) run(ctx context.Context, item queue.Item, delivery queue.Delivery) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			r.logger.Error("panic in task runner", "task_id", item.TaskID, "panic", rec)
-			r.fail(ctx, item.TaskID, fmt.Sprintf("internal error: %v", rec))
+			r.fail(ctx, item.TaskID, fmt.Sprintf("internal error: %v", rec), delivery)
+		}
+	}()
+
+	// A redelivered message for a task that already reached a terminal state
+	// means the original worker's Ack was lost (e.g. a network blip) even
+	// though the task actually finished — not that the task needs re-running.
+	// Skip re-execution and just ack so the message stops being redelivered.
+	if existing, err := r.store.GetTask(ctx, item.TaskID); err == nil && existing != nil && isTerminalStatus(existing.Status) {
+		r.logger.Info("skipping redelivered task already in terminal state", "task_id", item.TaskID, "status", existing.Status)
+		if err := delivery.Ack(); err != nil {
+			r.logger.Error("failed to ack already-terminal redelivered task", "task_id", item.TaskID, "err", err)
+		}
+		return
+	}
+
+	// Keep the queue delivery alive for the duration of a long-running task.
+	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
+	defer stopHeartbeat()
+	go func() {
+		ticker := time.NewTicker(heartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case <-ticker.C:
+				if err := delivery.Extend(); err != nil {
+					r.logger.Warn("failed to extend queue delivery", "task_id", item.TaskID, "err", err)
+				}
+			}
 		}
 	}()
 
@@ -158,6 +355,41 @@ func (r *Runner) run(ctx context.Context, item queue.Item) {
 		r.cancelMu.Unlock()
 	}()
 	ctx = taskCtxCancel
+
+	// Enforce a maximum active-execution duration so a runaway task can't run
+	// forever. Time spent paused in waiting_for_input does not count against
+	// this budget — that wait has its own, much longer, timeout (see the
+	// AskUser callback below) — so waitingForInput pauses the watchdog's clock.
+	maxTaskDuration := time.Duration(r.cfg.Agent.MaxTaskDuration) * time.Second
+	if maxTaskDuration <= 0 {
+		maxTaskDuration = 30 * time.Minute
+	}
+	var waitingForInput int32 // atomic bool
+	var timedOut int32        // atomic bool: set by the watchdog when it fires
+	watchdogDone := make(chan struct{})
+	defer close(watchdogDone)
+	go func() {
+		var active time.Duration
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-watchdogDone:
+				return
+			case <-ticker.C:
+				if atomic.LoadInt32(&waitingForInput) == 1 {
+					continue
+				}
+				active += time.Second
+				if active >= maxTaskDuration {
+					atomic.StoreInt32(&timedOut, 1)
+					r.logger.Warn("task exceeded max execution duration, cancelling", "task_id", item.TaskID, "max_duration", maxTaskDuration)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
 
 	startedAt := time.Now()
 
@@ -220,7 +452,22 @@ func (r *Runner) run(ctx context.Context, item queue.Item) {
 		waitTimeout = 7 * 24 * 3600 // 7 days default
 	}
 
+	// Per-task permission-response channel, for the confirm-before-destructive-
+	// tool flow (see the TurnEventPermission case in the event loop below).
+	permissionCh := make(chan bool, 1)
+	r.permissionMu.Lock()
+	r.permissions[item.TaskID] = permissionCh
+	r.permissionMu.Unlock()
+	defer func() {
+		r.permissionMu.Lock()
+		delete(r.permissions, item.TaskID)
+		r.permissionMu.Unlock()
+	}()
+
 	taskCtx = taskctx.WithAskUser(taskCtx, func(askCtx context.Context, question string) (string, error) {
+		atomic.StoreInt32(&waitingForInput, 1)
+		defer atomic.StoreInt32(&waitingForInput, 0)
+
 		if err := r.store.UpdateTaskStatus(ctx, item.TaskID, "waiting_for_input"); err != nil {
 			r.logger.Error("failed to update task status", "task_id", item.TaskID, "status", "waiting_for_input", "err", err)
 		}
@@ -248,7 +495,7 @@ func (r *Runner) run(ctx context.Context, item queue.Item) {
 
 	ag, err := r.wireAgent(taskCtx, item)
 	if err != nil {
-		r.fail(ctx, item.TaskID, fmt.Sprintf("agent setup: %v", err))
+		r.fail(ctx, item.TaskID, fmt.Sprintf("agent setup: %v", err), delivery)
 		return
 	}
 
@@ -297,7 +544,7 @@ func (r *Runner) run(ctx context.Context, item queue.Item) {
 
 		case agent.TurnEventPermission:
 			if ev.PermissionRequest != nil {
-				ev.PermissionRequest.ResponseCh <- true
+				ev.PermissionRequest.ResponseCh <- r.awaitPermission(ctx, item.TaskID, ev.PermissionRequest, waitTimeout, permissionCh, &waitingForInput)
 			}
 
 		case agent.TurnEventError:
@@ -322,36 +569,57 @@ func (r *Runner) run(ctx context.Context, item queue.Item) {
 	saveCtx := context.Background()
 
 	if taskErr != nil {
-		if errors.Is(taskErr, context.Canceled) {
-			metricTasksCompleted.WithLabelValues("cancelled").Inc()
-			if err := r.store.UpdateTaskResult(saveCtx, item.TaskID, "cancelled", "", "Task cancelled by user", outputBuf.String(), totalIn, totalOut); err != nil {
-				r.logger.Error("failed to update task result", "task_id", item.TaskID, "status", "cancelled", "err", err)
-			}
+		if errors.Is(taskErr, context.Canceled) && atomic.LoadInt32(&timedOut) == 1 {
+			const msg = "Task exceeded maximum execution time"
+			r.persistFinalResult(saveCtx, delivery, item.TaskID, "failed", "", msg, outputBuf.String(), totalIn, totalOut)
+			r.hub.Publish(item.TaskID, ServerEvent{Type: "error", Error: msg})
+		} else if errors.Is(taskErr, context.Canceled) {
+			r.persistFinalResult(saveCtx, delivery, item.TaskID, "cancelled", "", "Task cancelled by user", outputBuf.String(), totalIn, totalOut)
 			r.hub.Publish(item.TaskID, ServerEvent{Type: "error", Error: "Task cancelled by user"})
 		} else {
-			metricTasksCompleted.WithLabelValues("failed").Inc()
-			if err := r.store.UpdateTaskResult(saveCtx, item.TaskID, "failed", "", taskErr.Error(), outputBuf.String(), totalIn, totalOut); err != nil {
-				r.logger.Error("failed to update task result", "task_id", item.TaskID, "status", "failed", "err", err)
-			}
+			r.persistFinalResult(saveCtx, delivery, item.TaskID, "failed", "", taskErr.Error(), outputBuf.String(), totalIn, totalOut)
 			r.hub.Publish(item.TaskID, ServerEvent{Type: "error", Error: taskErr.Error()})
 		}
 		r.hub.Close(item.TaskID)
 		return
 	}
 
-	metricTasksCompleted.WithLabelValues("done").Inc()
-	if err := r.store.UpdateTaskResult(saveCtx, item.TaskID, "done", prURL, "", outputBuf.String(), totalIn, totalOut); err != nil {
-		r.logger.Error("failed to update task result", "task_id", item.TaskID, "status", "done", "err", err)
-	}
+	r.persistFinalResult(saveCtx, delivery, item.TaskID, "done", prURL, "", outputBuf.String(), totalIn, totalOut)
 	r.hub.Publish(item.TaskID, ServerEvent{Type: "done", PRUrl: prURL})
 	r.hub.Close(item.TaskID)
 }
 
-func (r *Runner) fail(_ context.Context, taskID, msg string) {
-	metricTasksCompleted.WithLabelValues("failed").Inc()
-	if err := r.store.UpdateTaskResult(context.Background(), taskID, "failed", "", msg, "", 0, 0); err != nil {
-		r.logger.Error("failed to persist task failure", "task_id", taskID, "err", err)
+// persistFinalResult writes a task's terminal outcome to the store and only
+// then acks the queue delivery — a failed write naks instead, so the queue
+// redelivers and the whole task is retried rather than silently lost. This is
+// the "ack only after persistence" invariant for the durable queue.
+func (r *Runner) persistFinalResult(ctx context.Context, delivery queue.Delivery, taskID, status, prURL, errMsg, output string, inputTokens, outputTokens int) {
+	metricTasksCompleted.WithLabelValues(status).Inc()
+	if err := r.store.UpdateTaskResult(ctx, taskID, status, prURL, errMsg, output, inputTokens, outputTokens); err != nil {
+		r.logger.Error("failed to update task result", "task_id", taskID, "status", status, "err", err)
+		if nakErr := delivery.Nak(); nakErr != nil {
+			r.logger.Error("failed to nak task after persistence failure", "task_id", taskID, "err", nakErr)
+		}
+		return
 	}
+	if err := delivery.Ack(); err != nil {
+		r.logger.Error("failed to ack completed task", "task_id", taskID, "err", err)
+	}
+}
+
+// isTerminalStatus reports whether a task status is a finished state that
+// should never be re-executed.
+func isTerminalStatus(status string) bool {
+	switch status {
+	case "done", "failed", "cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
+func (r *Runner) fail(_ context.Context, taskID, msg string, delivery queue.Delivery) {
+	r.persistFinalResult(context.Background(), delivery, taskID, "failed", "", msg, "", 0, 0)
 	r.hub.Publish(taskID, ServerEvent{Type: "error", Error: msg})
 	r.hub.Close(taskID)
 }
@@ -383,7 +651,7 @@ func (r *Runner) wireAgent(ctx context.Context, item queue.Item) (*agent.Agent, 
 	toolReg.Register(tools.NewAgentTool(r.buildSubAgentRunner(cwd)))
 
 	skillReg := skills.NewRegistry()
-	skillReg.Register(&skills.RepoScanSkill{})
+	skillReg.Register(skills.NewRepoScanSkill(r.store))
 	skillReg.Register(skills.NewClarifierSkill(r.provider, model))
 	skillReg.Register(skills.NewGenerateSkill(cwd))
 	skillReg.Register(&skills.ValidateSkill{})

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { cancelTask, listTasks } from "../lib/api";
 import type { TaskDetail } from "../types";
 
@@ -46,7 +46,7 @@ export function HistoryPage({ onSelectTask, refreshTrigger }: Props) {
           Recent Tasks
         </div>
         <div style={{ fontSize: "var(--text-sm)", color: "var(--text-3)", marginTop: 3 }}>
-          All tasks submitted to tf-agent
+          All tasks submitted to iac-agent
         </div>
       </div>
 
@@ -85,9 +85,8 @@ export function HistoryPage({ onSelectTask, refreshTrigger }: Props) {
                   const isJira     = /^\[JIRA:/i.test(task.input_text);
 
                   return (
-                    <>
+                    <Fragment key={task.id}>
                       <tr
-                        key={task.id}
                         onClick={() => toggleExpand(task.id)}
                         onMouseEnter={() => setHoveredId(task.id)}
                         onMouseLeave={() => setHoveredId(null)}
@@ -148,7 +147,7 @@ export function HistoryPage({ onSelectTask, refreshTrigger }: Props) {
                           </td>
                         </tr>
                       )}
-                    </>
+                    </Fragment>
                   );
                 })}
               </tbody>

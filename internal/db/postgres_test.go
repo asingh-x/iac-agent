@@ -4,6 +4,7 @@ package db_test
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"testing"
 
@@ -174,6 +175,34 @@ func TestPostgres_MarkStaleTasksFailed(t *testing.T) {
 	}
 }
 
+func TestPostgres_MarkStaleTasksFailed_SkipsCompletedAt(t *testing.T) {
+	s := newPostgresStore(t)
+	ctx := context.Background()
+
+	u, err := s.CreateUser(ctx, "pg-stale-completed-user", "stalehash2", "member")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { _ = s.DeleteUser(ctx, u.ID) })
+
+	// Defense-in-depth case: a row whose completed_at is already set must
+	// never be retroactively marked failed by the bulk stale-task sweep,
+	// even if its status column looks non-terminal.
+	task, _ := s.CreateTask(ctx, u.ID, "prompt", "already completed", "print")
+	if err := s.UpdateTaskResult(ctx, task.ID, "running", "", "", "output", 1, 1); err != nil {
+		t.Fatalf("UpdateTaskResult: %v", err)
+	}
+
+	if err := s.MarkStaleTasksFailed(ctx); err != nil {
+		t.Fatalf("MarkStaleTasksFailed: %v", err)
+	}
+
+	got, _ := s.GetTask(ctx, task.ID)
+	if got.Status != "running" {
+		t.Errorf("got status %q, want unchanged (running) — completed_at must guard against retroactive failure", got.Status)
+	}
+}
+
 func TestPostgres_UserSettings(t *testing.T) {
 	s := newPostgresStore(t)
 	ctx := context.Background()
@@ -212,5 +241,74 @@ func TestPostgres_Ping(t *testing.T) {
 	s := newPostgresStore(t)
 	if err := s.Ping(context.Background()); err != nil {
 		t.Fatalf("Ping: %v", err)
+	}
+}
+
+func TestPostgres_MigrationsAreIdempotent(t *testing.T) {
+	url := os.Getenv("DB_URL")
+	if url == "" {
+		t.Skip("DB_URL not set — skipping postgres integration tests")
+	}
+
+	s1, err := db.NewPostgres(url)
+	if err != nil {
+		t.Fatalf("NewPostgres (1st): %v", err)
+	}
+	_ = s1.Close()
+
+	// Second open simulates a server restart against an already-migrated DB.
+	s2, err := db.NewPostgres(url)
+	if err != nil {
+		t.Fatalf("NewPostgres (2nd): %v", err)
+	}
+	defer s2.Close()
+
+	raw, err := sql.Open("pgx", url)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer raw.Close()
+
+	var count int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil {
+		t.Fatalf("count schema_migrations: %v", err)
+	}
+	if count == 0 {
+		t.Error("expected at least one recorded migration, got 0")
+	}
+}
+
+func TestPostgres_AuditTrail(t *testing.T) {
+	s := newPostgresStore(t)
+	ctx := context.Background()
+
+	admin, err := s.CreateUser(ctx, "pg-audit-admin", "audithash", "admin")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	if err := s.RecordAuditEvent(ctx, admin.ID, admin.Username, "user.create", "target-123", "username=bob role=member"); err != nil {
+		t.Fatalf("RecordAuditEvent: %v", err)
+	}
+
+	events, err := s.ListAuditEvents(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListAuditEvents: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("expected at least one audit event")
+	}
+	if events[0].Action != "user.create" || events[0].TargetID != "target-123" {
+		t.Errorf("got event %+v, want action=user.create target_id=target-123", events[0])
+	}
+	if events[0].ActorUsername != admin.Username {
+		t.Errorf("got actor_username %q, want %q", events[0].ActorUsername, admin.Username)
+	}
+
+	// Regression test for the FK-cascade bug: an admin who has performed an
+	// audited action must still be deletable — this used to fail with a
+	// foreign-key violation because audit_events.actor_id referenced users(id).
+	if err := s.DeleteUser(ctx, admin.ID); err != nil {
+		t.Fatalf("DeleteUser after audit event: %v", err)
 	}
 }

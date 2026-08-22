@@ -19,7 +19,15 @@ export interface UserSettings {
   atlassian_email: string;
 }
 
-export type SSEEventType = "text" | "tool_start" | "tool_end" | "done" | "error" | "status" | "waiting_for_input";
+export type SSEEventType =
+  | "text"
+  | "tool_start"
+  | "tool_end"
+  | "done"
+  | "error"
+  | "status"
+  | "waiting_for_input"
+  | "permission_request";
 
 export interface SSEEvent {
   type: SSEEventType;
@@ -29,6 +37,14 @@ export interface SSEEvent {
   pr_url?: string;
   status?: string;
   error?: string;
+}
+
+// Set when an SSE event of type "permission_request" arrives — the agent
+// wants to run a destructive tool (bash/write/edit by default) and is
+// paused waiting for a human decision.
+export interface PendingPermission {
+  tool: string;
+  preview: string;
 }
 
 export interface ModelInfo {

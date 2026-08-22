@@ -25,7 +25,7 @@ export function LoginScreen({ onLogin }: Props) {
       localStorage.setItem("tf_agent_token", trimmed);
       onLogin(trimmed);
     } catch {
-      setError("Could not reach server. Is tf-agent running?");
+      setError("Could not reach server. Is iac-agent running?");
     } finally {
       setLoading(false);
     }
@@ -50,7 +50,7 @@ export function LoginScreen({ onLogin }: Props) {
             </svg>
           </div>
           <div style={{ fontSize: "var(--text-xl)", fontWeight: 700, color: "var(--text)", letterSpacing: "-.02em" }}>
-            tf-agent
+            iac-agent
           </div>
           <div style={{ fontSize: "var(--text-sm)", color: "var(--text-3)", marginTop: 4 }}>
             Terraform infrastructure automation

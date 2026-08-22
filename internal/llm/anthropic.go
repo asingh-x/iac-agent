@@ -42,7 +42,7 @@ type anthropicRequest struct {
 	Model     string             `json:"model"`
 	MaxTokens int                `json:"max_tokens"`
 	Stream    bool               `json:"stream"`
-	System    string             `json:"system,omitempty"`
+	System    []wireSystemBlock  `json:"system,omitempty"`
 	Messages  []anthropicMessage `json:"messages"`
 	Tools     []ToolSchema       `json:"tools,omitempty"`
 }
@@ -52,22 +52,45 @@ type anthropicMessage struct {
 	Content []interface{} `json:"content"`
 }
 
-type wireTextBlock struct {
+// wireCacheControl marks a content block as a prompt-caching breakpoint.
+// Anthropic caches everything up to and including the block it's attached to.
+type wireCacheControl struct {
 	Type string `json:"type"`
-	Text string `json:"text"`
+}
+
+// ephemeralCacheControl is the standard (5-minute TTL) cache breakpoint marker.
+func ephemeralCacheControl() *wireCacheControl {
+	return &wireCacheControl{Type: "ephemeral"}
+}
+
+// wireSystemBlock is a system-prompt content block. The Anthropic API accepts
+// System either as a bare string or as an array of blocks like this one — the
+// array form is required to attach a cache_control breakpoint.
+type wireSystemBlock struct {
+	Type         string            `json:"type"`
+	Text         string            `json:"text"`
+	CacheControl *wireCacheControl `json:"cache_control,omitempty"`
+}
+
+type wireTextBlock struct {
+	Type         string            `json:"type"`
+	Text         string            `json:"text"`
+	CacheControl *wireCacheControl `json:"cache_control,omitempty"`
 }
 
 type wireToolUseBlock struct {
-	Type  string          `json:"type"`
-	ID    string          `json:"id"`
-	Name  string          `json:"name"`
-	Input json.RawMessage `json:"input"`
+	Type         string            `json:"type"`
+	ID           string            `json:"id"`
+	Name         string            `json:"name"`
+	Input        json.RawMessage   `json:"input"`
+	CacheControl *wireCacheControl `json:"cache_control,omitempty"`
 }
 
 type wireToolResultBlock struct {
-	Type      string `json:"type"`
-	ToolUseID string `json:"tool_use_id"`
-	Content   string `json:"content"`
+	Type         string            `json:"type"`
+	ToolUseID    string            `json:"tool_use_id"`
+	Content      string            `json:"content"`
+	CacheControl *wireCacheControl `json:"cache_control,omitempty"`
 }
 
 func convertMessages(msgs []Message) []anthropicMessage {
@@ -97,6 +120,76 @@ func convertMessages(msgs []Message) []anthropicMessage {
 	return out
 }
 
+// buildSystemBlocks wraps the flat system prompt string into the array form
+// required to attach a cache_control breakpoint. The system prompt is built
+// once per agent turn-loop and resent unchanged on every request within that
+// loop (see internal/agent/loop.go RunTurn + BuildSystemPrompt), so it is the
+// highest-value, lowest-risk cache breakpoint: caching it means every
+// tool-use round trip within a turn re-reads the (large, static) system
+// prompt from cache instead of paying full input-token price for it again.
+func buildSystemBlocks(system string) []wireSystemBlock {
+	if system == "" {
+		return nil
+	}
+	return []wireSystemBlock{
+		{
+			Type:         "text",
+			Text:         system,
+			CacheControl: ephemeralCacheControl(),
+		},
+	}
+}
+
+// applyConversationCacheControl marks the last content block of the last
+// message as a cache breakpoint. Because the agent loop only ever appends to
+// the message history within a turn-loop (assistant reply, then tool
+// results, then the next request), the prefix up to and including the
+// previous "last block" is byte-identical across requests — so marking the
+// new last block on every request lets each subsequent request cache-read
+// everything before it instead of re-paying for the full growing history.
+func applyConversationCacheControl(messages []anthropicMessage) {
+	if len(messages) == 0 {
+		return
+	}
+	last := &messages[len(messages)-1]
+	if len(last.Content) == 0 {
+		return
+	}
+	idx := len(last.Content) - 1
+	switch b := last.Content[idx].(type) {
+	case wireTextBlock:
+		b.CacheControl = ephemeralCacheControl()
+		last.Content[idx] = b
+	case wireToolUseBlock:
+		b.CacheControl = ephemeralCacheControl()
+		last.Content[idx] = b
+	case wireToolResultBlock:
+		b.CacheControl = ephemeralCacheControl()
+		last.Content[idx] = b
+	}
+}
+
+// buildRequest constructs the outgoing Anthropic Messages API request body,
+// attaching prompt-caching breakpoints: one on the system prompt block, and
+// one on the last content block of the conversation so far. This is the
+// single seam used by both doStream and the unit tests below — it does no
+// I/O, so it can be tested without a live API key or network call.
+func buildRequest(req Request, stream bool) anthropicRequest {
+	ar := anthropicRequest{
+		Model:     req.Model,
+		MaxTokens: req.MaxTokens,
+		Stream:    stream,
+		System:    buildSystemBlocks(req.System),
+		Messages:  convertMessages(req.Messages),
+		Tools:     req.Tools,
+	}
+	if len(ar.Tools) == 0 {
+		ar.Tools = nil
+	}
+	applyConversationCacheControl(ar.Messages)
+	return ar
+}
+
 // Stream opens a streaming connection and returns a channel of events.
 // Retries up to 3 times on 429/503/529.
 func (p *AnthropicProvider) Stream(ctx context.Context, req Request) (<-chan Event, error) {
@@ -114,17 +207,7 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req Request) (<-chan Eve
 }
 
 func (p *AnthropicProvider) doStream(ctx context.Context, req Request, ch chan<- Event) error {
-	ar := anthropicRequest{
-		Model:     req.Model,
-		MaxTokens: req.MaxTokens,
-		Stream:    true,
-		System:    req.System,
-		Messages:  convertMessages(req.Messages),
-		Tools:     req.Tools,
-	}
-	if len(ar.Tools) == 0 {
-		ar.Tools = nil
-	}
+	ar := buildRequest(req, true)
 
 	payload, err := json.Marshal(ar)
 	if err != nil {

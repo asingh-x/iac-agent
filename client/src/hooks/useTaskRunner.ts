@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef } from "react";
-import { submitTask, streamTask, answerTask, cancelTask } from "../lib/api";
-import type { TaskFormValues, OutputLine, SSEEvent } from "../types";
+import { submitTask, streamTask, answerTask, cancelTask, respondToPermission as respondToPermissionAPI } from "../lib/api";
+import type { TaskFormValues, OutputLine, SSEEvent, PendingPermission } from "../types";
 
 function uid() {
   return Math.random().toString(36).slice(2);
@@ -14,6 +14,7 @@ export function useTaskRunner() {
   const [prUrl, setPrUrl] = useState<string | null>(null);
   const [taskId, setTaskId] = useState<string | null>(null);
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
+  const [pendingPermission, setPendingPermission] = useState<PendingPermission | null>(null);
   const esRef = useRef<EventSource | null>(null);
   const assistantLineId = useRef<string | null>(null);
   const taskIdRef = useRef<string | null>(null);
@@ -24,6 +25,7 @@ export function useTaskRunner() {
     setPrUrl(null);
     setTaskId(null);
     setPendingQuestion(null);
+    setPendingPermission(null);
     assistantLineId.current = null;
     taskIdRef.current = null;
     setState("submitting");
@@ -78,6 +80,12 @@ export function useTaskRunner() {
           case "waiting_for_input":
             assistantLineId.current = null;
             setPendingQuestion(ev.text ?? "The agent needs more information.");
+            setState("waiting");
+            break;
+
+          case "permission_request":
+            assistantLineId.current = null;
+            setPendingPermission({ tool: ev.tool ?? "unknown tool", preview: ev.text ?? "" });
             setState("waiting");
             break;
 
@@ -141,6 +149,11 @@ export function useTaskRunner() {
           setPendingQuestion(ev.text ?? "The agent needs more information.");
           setState("waiting");
           break;
+        case "permission_request":
+          assistantLineId.current = null;
+          setPendingPermission({ tool: ev.tool ?? "unknown tool", preview: ev.text ?? "" });
+          setState("waiting");
+          break;
         case "done":
           if (ev.pr_url) setPrUrl(ev.pr_url);
           es.close();
@@ -168,6 +181,7 @@ export function useTaskRunner() {
     ]);
     setPrUrl(null);
     setPendingQuestion(null);
+    setPendingPermission(null);
     assistantLineId.current = null;
     setState("streaming");
     attachStream(task_id);
@@ -183,6 +197,20 @@ export function useTaskRunner() {
     await answerTask(id, answer).catch(() => {});
   }, [state]);
 
+  const respondToPermission = useCallback(async (allow: boolean) => {
+    const id = taskIdRef.current;
+    if (!id || state !== "waiting" || !pendingPermission) return;
+    const tool = pendingPermission.tool;
+    setPendingPermission(null);
+    setState("streaming");
+    setOutput((prev) => [
+      ...prev,
+      { id: uid(), kind: "status", content: allow ? `You: approved ${tool}` : `You: denied ${tool}` },
+    ]);
+    assistantLineId.current = null;
+    await respondToPermissionAPI(id, allow).catch(() => {});
+  }, [state, pendingPermission]);
+
   const cancel = useCallback(async () => {
     const id = taskIdRef.current;
     if (!id) return;
@@ -195,10 +223,14 @@ export function useTaskRunner() {
     setPrUrl(null);
     setTaskId(null);
     setPendingQuestion(null);
+    setPendingPermission(null);
     setState("idle");
     assistantLineId.current = null;
     taskIdRef.current = null;
   }, []);
 
-  return { state, output, prUrl, taskId, pendingQuestion, run, reconnect, sendAnswer, cancel, reset };
+  return {
+    state, output, prUrl, taskId, pendingQuestion, pendingPermission,
+    run, reconnect, sendAnswer, respondToPermission, cancel, reset,
+  };
 }

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -30,6 +31,8 @@ type testEnv struct {
 	memberToken string
 	runner      *server.Runner
 	cancel      context.CancelFunc
+	cfg         *config.Config
+	provider    *llm.MockProvider
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -81,7 +84,10 @@ func newTestEnv(t *testing.T) *testEnv {
 	go runner.Start(runCtx)
 
 	t.Cleanup(func() {
-		cancel()
+		cancel() // stop the queue pop loop from picking up new work
+		shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		runner.Shutdown(shutCtx) // force-cancel any still in-flight task before closing the store
+		shutCancel()
 		ts.Close()
 		store.Close()
 	})
@@ -93,6 +99,8 @@ func newTestEnv(t *testing.T) *testEnv {
 		memberToken: memberToken,
 		runner:      runner,
 		cancel:      cancel,
+		cfg:         cfg,
+		provider:    mockProvider,
 	}
 }
 
@@ -148,6 +156,91 @@ func TestServer_Health(t *testing.T) {
 	_ = json.NewDecoder(resp.Body).Decode(&body)
 	if body["status"] != "ok" {
 		t.Errorf("health status = %v, want ok", body["status"])
+	}
+	if _, ok := body["queue_len"]; !ok {
+		t.Errorf("health response missing queue_len: %v", body)
+	}
+	depth, ok := body["queue_depth"].(map[string]any)
+	if !ok {
+		t.Fatalf("health response missing queue_depth map: %v", body)
+	}
+	if _, ok := depth["default"]; !ok {
+		t.Errorf("queue_depth missing \"default\" entry: %v", depth)
+	}
+}
+
+// TestServer_Health_QueueDepth verifies /healthz reports the actual pending
+// item count per named queue, and that the tfagent_queue_depth Prometheus
+// gauge is registered and reflects the same value at /metrics.
+func TestServer_Health_QueueDepth(t *testing.T) {
+	store := db.NewMemoryStore()
+	t.Cleanup(func() { store.Close() })
+
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	if err := server.LoadEncryptionKey(); err != nil {
+		t.Fatalf("LoadEncryptionKey: %v", err)
+	}
+
+	cfg := config.Defaults()
+	cfg.Provider.Anthropic.APIKey = "test-key"
+
+	// Push items onto two named queues without starting a runner, so the
+	// items stay put and depth reporting can be asserted deterministically.
+	defaultQ := queue.NewMemoryQueue(100)
+	highQ := queue.NewMemoryQueue(100)
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		item := queue.Item{TaskID: fmt.Sprintf("t%d", i), InputType: "prompt", InputText: "x", OutputType: "print"}
+		if err := defaultQ.Push(ctx, item); err != nil {
+			t.Fatalf("push default: %v", err)
+		}
+	}
+	if err := highQ.Push(ctx, queue.Item{TaskID: "h0", InputType: "prompt", InputText: "x", OutputType: "print"}); err != nil {
+		t.Fatalf("push high: %v", err)
+	}
+
+	queues := map[string]queue.Queue{"default": defaultQ, "high": highQ}
+	srv := server.NewServer(store, server.NewHub(), queues, nil, cfg, embed.FS{})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	resp, err := http.Get(ts.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("GET /healthz: %v", err)
+	}
+	var body struct {
+		QueueLen   int            `json:"queue_len"`
+		QueueDepth map[string]int `json:"queue_depth"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode healthz body: %v", err)
+	}
+	if body.QueueLen != 4 {
+		t.Errorf("queue_len = %d, want 4", body.QueueLen)
+	}
+	if body.QueueDepth["default"] != 3 {
+		t.Errorf("queue_depth[default] = %d, want 3", body.QueueDepth["default"])
+	}
+	if body.QueueDepth["high"] != 1 {
+		t.Errorf("queue_depth[high] = %d, want 1", body.QueueDepth["high"])
+	}
+
+	// The healthz call above should have updated the Prometheus gauge; confirm
+	// it is registered and scraped with the matching per-queue values.
+	mresp, err := http.Get(ts.URL + "/metrics")
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	data, err := io.ReadAll(mresp.Body)
+	if err != nil {
+		t.Fatalf("read /metrics body: %v", err)
+	}
+	metrics := string(data)
+	if !strings.Contains(metrics, `tfagent_queue_depth{queue="default"} 3`) {
+		t.Errorf("/metrics missing tfagent_queue_depth for default queue at 3:\n%s", metrics)
+	}
+	if !strings.Contains(metrics, `tfagent_queue_depth{queue="high"} 1`) {
+		t.Errorf("/metrics missing tfagent_queue_depth for high queue at 1:\n%s", metrics)
 	}
 }
 
@@ -928,3 +1021,55 @@ func TestServer_RegenerateToken(t *testing.T) {
 
 // suppress unused import
 var _ = fmt.Sprintf
+
+func TestServer_AdminActions_AreAudited(t *testing.T) {
+	env := newTestEnv(t)
+
+	resp := env.do("POST", "/v1/admin/users", env.adminToken, map[string]string{
+		"username": "carol",
+		"token":    "carol-secret-token",
+		"role":     "member",
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create user status = %d, want 201", resp.StatusCode)
+	}
+	var created map[string]string
+	_ = json.NewDecoder(resp.Body).Decode(&created)
+
+	resp = env.do("POST", fmt.Sprintf("/v1/admin/users/%s/deactivate", created["id"]), env.adminToken, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("deactivate status = %d, want 200", resp.StatusCode)
+	}
+
+	events, err := env.store.ListAuditEvents(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListAuditEvents: %v", err)
+	}
+	if len(events) < 2 {
+		t.Fatalf("expected at least 2 audit events, got %d", len(events))
+	}
+
+	var sawCreate, sawDeactivate bool
+	for _, e := range events {
+		if e.Action == "user.create" && e.TargetID == created["id"] {
+			sawCreate = true
+		}
+		if e.Action == "user.deactivate" && e.TargetID == created["id"] {
+			sawDeactivate = true
+		}
+	}
+	if !sawCreate {
+		t.Error("expected a user.create audit event for the new user")
+	}
+	if !sawDeactivate {
+		t.Error("expected a user.deactivate audit event for the new user")
+	}
+}
+
+func TestServer_AuditLog_ForbiddenForMember(t *testing.T) {
+	env := newTestEnv(t)
+	resp := env.do("GET", "/v1/admin/audit-log", env.memberToken, nil)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", resp.StatusCode)
+	}
+}

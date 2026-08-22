@@ -110,8 +110,12 @@ func main() {
 		if natsURL == "" {
 			natsURL = "nats://127.0.0.1:4222"
 		}
+		natsMaxMsgs := cfg.Server.NATSMaxMsgs
+		if natsMaxMsgs <= 0 {
+			natsMaxMsgs = queue.DefaultNATSMaxMsgs
+		}
 		for _, name := range queueNames {
-			nq, err := queue.NewNATSQueue(natsURL, name)
+			nq, err := queue.NewNATSQueue(natsURL, name, natsMaxMsgs)
 			if err != nil {
 				logger.Error("failed to connect to nats queue", "name", name, "err", err)
 				os.Exit(1)
@@ -162,9 +166,20 @@ func main() {
 
 	go func() {
 		<-ctx.Done()
+		logger.Info("shutdown signal received, draining in-flight tasks")
+
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer shutCancel()
 		_ = httpServer.Shutdown(shutCtx)
+
+		gracePeriod := time.Duration(cfg.Server.ShutdownGracePeriod) * time.Second
+		if gracePeriod <= 0 {
+			gracePeriod = 60 * time.Second
+		}
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), gracePeriod)
+		defer drainCancel()
+		runner.Shutdown(drainCtx)
+		logger.Info("shutdown drain complete")
 	}()
 
 	logger.Info("tf-agent-server listening", "addr", addr)

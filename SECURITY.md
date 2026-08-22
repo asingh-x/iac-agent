@@ -4,7 +4,7 @@
 
 Please do **not** open a public GitHub issue for security vulnerabilities.
 
-Instead, [create a GitHub Security Advisory](https://github.com/asingh-x/tf-agent/security/advisories/new) with:
+Instead, [create a GitHub Security Advisory](https://github.com/asingh-x/iac-agent/security/advisories/new) with:
 - A description of the vulnerability
 - Steps to reproduce
 - Potential impact

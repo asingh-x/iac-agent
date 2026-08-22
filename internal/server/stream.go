@@ -10,7 +10,7 @@ import (
 
 // ServerEvent is the SSE payload sent to clients.
 type ServerEvent struct {
-	Type   string `json:"type"`             // text|tool_start|tool_end|done|error|status
+	Type   string `json:"type"`             // text|tool_start|tool_end|done|error|status|waiting_for_input|permission_request
 	Text   string `json:"text,omitempty"`   // for type=text
 	Tool   string `json:"tool,omitempty"`   // for type=tool_start|tool_end
 	Output string `json:"output,omitempty"` // for type=tool_end

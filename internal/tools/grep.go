@@ -76,10 +76,10 @@ func (t *GrepTool) Execute(_ context.Context, input json.RawMessage) (string, er
 
 	searchPath := t.cwd
 	if args.Path != "" {
-		if filepath.IsAbs(args.Path) {
-			searchPath = args.Path
-		} else {
-			searchPath = filepath.Join(t.cwd, args.Path)
+		var err error
+		searchPath, err = resolveScoped(t.cwd, args.Path)
+		if err != nil {
+			return "", fmt.Errorf("grep: %w", err)
 		}
 	}
 

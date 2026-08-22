@@ -4,6 +4,7 @@ package queue_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -16,6 +17,14 @@ import (
 
 func newNATSQueue(t *testing.T) *queue.NATSQueue {
 	t.Helper()
+	return newNATSQueueWithMaxMsgs(t, 0) // 0 -> queue.DefaultNATSMaxMsgs
+}
+
+// newNATSQueueWithMaxMsgs is like newNATSQueue but lets the caller override
+// the stream's MaxMsgs backpressure limit (e.g. a small value so a
+// backpressure test doesn't need to publish thousands of messages).
+func newNATSQueueWithMaxMsgs(t *testing.T, maxMsgs int) *queue.NATSQueue {
+	t.Helper()
 	url := os.Getenv("NATS_URL")
 	if url == "" {
 		t.Skip("NATS_URL not set — skipping NATS integration tests")
@@ -27,7 +36,7 @@ func newNATSQueue(t *testing.T) *queue.NATSQueue {
 		}
 		return '-'
 	}, t.Name())
-	q, err := queue.NewNATSQueue(url, name)
+	q, err := queue.NewNATSQueue(url, name, maxMsgs)
 	if err != nil {
 		t.Fatalf("NewNATSQueue: %v", err)
 	}
@@ -54,7 +63,7 @@ func TestNATSQueue_PushPop(t *testing.T) {
 	ctx2, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	got, err := q.Pop(ctx2)
+	got, _, err := q.Pop(ctx2)
 	if err != nil {
 		t.Fatalf("Pop: %v", err)
 	}
@@ -72,7 +81,7 @@ func TestNATSQueue_PopCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 
-	_, err := q.Pop(ctx)
+	_, _, err := q.Pop(ctx)
 	if err == nil {
 		t.Error("expected context error, got nil")
 	}
@@ -97,7 +106,7 @@ func TestNATSQueue_MultipleItems(t *testing.T) {
 	seen := map[string]bool{}
 	for range items {
 		ctx2, cancel := context.WithTimeout(ctx, 5*time.Second)
-		got, err := q.Pop(ctx2)
+		got, _, err := q.Pop(ctx2)
 		cancel()
 		if err != nil {
 			t.Fatalf("Pop: %v", err)
@@ -109,6 +118,51 @@ func TestNATSQueue_MultipleItems(t *testing.T) {
 		if !seen[item.TaskID] {
 			t.Errorf("never received task %s", item.TaskID)
 		}
+	}
+}
+
+// TestNATSQueue_PushBackpressure verifies that once the shared stream's
+// MaxMsgs limit is reached, Push starts returning an error instead of
+// accepting publishes indefinitely (the backpressure mechanism added to
+// NewNATSQueue via StreamConfig.MaxMsgs + Discard: nats.DiscardNew).
+//
+// Note: MaxMsgs bounds the TOTAL backlog on the shared TF_AGENT stream, not
+// just this test's queue name/subject (see the doc comment on NewNATSQueue).
+// Other tests in this file Pop messages without Acking them, which can leave
+// a few unacked messages sitting in the shared stream and eating into this
+// test's budget. So rather than asserting exactly maxMsgs pushes succeed
+// before failure, this pushes in a loop (bounded generously above maxMsgs)
+// until Push fails, then confirms the failure isn't a one-off blip.
+func TestNATSQueue_PushBackpressure(t *testing.T) {
+	const maxMsgs = 5
+	q := newNATSQueueWithMaxMsgs(t, maxMsgs)
+	ctx := context.Background()
+
+	pushed := 0
+	var pushErr error
+	for i := 0; i < maxMsgs*4; i++ {
+		item := queue.Item{
+			TaskID:     fmt.Sprintf("backpressure-%d", i),
+			UserID:     "u1",
+			InputType:  "prompt",
+			InputText:  "x",
+			OutputType: "print",
+		}
+		if err := q.Push(ctx, item); err != nil {
+			pushErr = err
+			break
+		}
+		pushed++
+	}
+	if pushErr == nil {
+		t.Fatalf("expected Push to eventually fail with backpressure (maxMsgs=%d) after %d successful pushes, got no error", maxMsgs, pushed)
+	}
+	t.Logf("backpressure triggered after %d successful pushes (maxMsgs=%d): %v", pushed, maxMsgs, pushErr)
+
+	// Confirm the rejection persists — a real limit, not a transient blip.
+	again := queue.Item{TaskID: "backpressure-again", InputType: "prompt", InputText: "x", OutputType: "print"}
+	if err := q.Push(ctx, again); err == nil {
+		t.Error("expected Push to still fail immediately after backpressure was triggered, got nil error")
 	}
 }
 
@@ -127,7 +181,7 @@ func TestNATSQueue_CredentialsNotPersisted(t *testing.T) {
 	}
 	ctx2, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	got, err := q.Pop(ctx2)
+	got, _, err := q.Pop(ctx2)
 	if err != nil {
 		t.Fatalf("Pop: %v", err)
 	}

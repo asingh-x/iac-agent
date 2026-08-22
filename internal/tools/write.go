@@ -73,11 +73,10 @@ func (t *WriteTool) Execute(_ context.Context, input json.RawMessage) (string, e
 		return "", fmt.Errorf("write: writing to %q is not allowed", args.FilePath)
 	}
 
-	path := args.FilePath
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(t.cwd, path)
+	path, err := resolveScoped(t.cwd, args.FilePath)
+	if err != nil {
+		return "", fmt.Errorf("write: %w", err)
 	}
-	path = filepath.Clean(path)
 
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return "", fmt.Errorf("write: mkdir: %w", err)

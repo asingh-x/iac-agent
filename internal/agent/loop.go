@@ -23,13 +23,13 @@ import (
 type TurnEventType int
 
 const (
-	TurnEventText        TurnEventType = iota
-	TurnEventToolStart                 // tool call starting
-	TurnEventToolEnd                   // tool call completed
-	TurnEventPermission                // needs user permission
-	TurnEventUsage                     // token usage
-	TurnEventError                     // non-fatal error info
-	TurnEventDone                      // turn complete
+	TurnEventText       TurnEventType = iota
+	TurnEventToolStart                // tool call starting
+	TurnEventToolEnd                  // tool call completed
+	TurnEventPermission               // needs user permission
+	TurnEventUsage                    // token usage
+	TurnEventError                    // non-fatal error info
+	TurnEventDone                     // turn complete
 )
 
 // ToolCall describes a pending tool invocation.
@@ -124,6 +124,14 @@ func (a *Agent) RunTurn(ctx context.Context, userInput string) <-chan TurnEvent 
 }
 
 func (a *Agent) runTurn(ctx context.Context, userInput string, ch chan<- TurnEvent) {
+	// Auto-compact before this turn if the conversation is approaching the
+	// model's context window, so long-running conversations don't require
+	// the user to invoke "/compact" themselves. This checks the token usage
+	// from the last completed turn (see lastKnownInputTokens) — growth
+	// within a single turn's own tool-call round trips is bounded by
+	// cfg.Agent.MaxTurns and picked up at the start of the next turn.
+	a.maybeAutoCompact(lastKnownInputTokens(a.session))
+
 	// Save user message to session.
 	_ = a.session.Append(session.Record{Type: "user", Content: userInput})
 

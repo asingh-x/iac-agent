@@ -56,28 +56,33 @@ export function HeroPage({ onNavigate }: Props) {
   const allDone = phase >= PIPELINE.length;
 
   return (
-    <div style={{ animation: "slideUp .25s ease" }}>
+    <div style={{ animation: "slideUp .25s ease", display: "flex", flexDirection: "column", gap: 20 }}>
       {/* Hero */}
-      <div style={{ paddingTop: 24, paddingBottom: 40 }}>
+      <div style={{ paddingTop: 8, paddingBottom: 4 }}>
         <h1 style={{
-          fontSize: 32, fontWeight: 700, color: "var(--text)",
+          fontSize: 34, fontWeight: 700, color: "var(--text)",
           letterSpacing: "-.03em", lineHeight: 1.2, marginBottom: 14,
         }}>
-          Generate Terraform<br />infrastructure, instantly.
+          Create your PR now.
         </h1>
-        <p style={{ fontSize: "var(--text-base)", color: "var(--text-3)", lineHeight: 1.75, maxWidth: 460 }}>
-          Describe what you need. tf-agent scans your repos for existing patterns,
+        <p style={{ fontSize: "var(--text-base)", color: "var(--text-3)", lineHeight: 1.75, maxWidth: 520, marginBottom: 22 }}>
+          Describe what you need. iac-agent scans your repos for existing patterns,
           writes HCL, runs{" "}
           <code style={{ fontFamily: "var(--font-mono)", fontSize: 13, color: "var(--text-2)", background: "var(--surface-2)", padding: "1px 5px", borderRadius: 4 }}>
             terraform validate
           </code>
           , and opens a pull request — autonomously.
         </p>
+        {onNavigate && (
+          <button className="btn btn-primary" onClick={() => onNavigate("form")}>
+            Start a new task →
+          </button>
+        )}
       </div>
 
       {/* Animated pipeline */}
-      <div style={{ borderTop: "1px solid var(--border)", paddingTop: 24, paddingBottom: 24 }}>
-        <div style={{ fontSize: "var(--text-xs)", fontWeight: 600, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 14 }}>
+      <div className="card" style={{ padding: "20px 24px" }}>
+        <div style={{ fontSize: "var(--text-xs)", fontWeight: 600, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 16 }}>
           How it works
         </div>
 
@@ -140,8 +145,8 @@ export function HeroPage({ onNavigate }: Props) {
       </div>
 
       {/* Integrations */}
-      <div style={{ borderTop: "1px solid var(--border)", paddingTop: 20 }}>
-        <div style={{ fontSize: "var(--text-xs)", fontWeight: 600, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 10 }}>
+      <div className="card" style={{ padding: "20px 24px" }}>
+        <div style={{ fontSize: "var(--text-xs)", fontWeight: 600, color: "var(--text-3)", textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 12 }}>
           Integrations
         </div>
         <div style={{ display: "flex", gap: 8 }}>

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 )
 
@@ -17,21 +18,21 @@ type User struct {
 
 // Task represents a submitted agent task.
 type Task struct {
-	ID           string     `json:"id"`
-	UserID       string     `json:"user_id"`
-	Status       string     `json:"status"`
-	InputType    string     `json:"input_type"`
-	InputText    string     `json:"input_text"`
-	OutputType   string     `json:"output_type"`
-	PRUrl        string     `json:"pr_url,omitempty"`
-	InputTokens  int        `json:"input_tokens"`
-	OutputTokens int        `json:"output_tokens"`
-	ErrorMsg     string     `json:"error_msg,omitempty"`
+	ID              string     `json:"id"`
+	UserID          string     `json:"user_id"`
+	Status          string     `json:"status"`
+	InputType       string     `json:"input_type"`
+	InputText       string     `json:"input_text"`
+	OutputType      string     `json:"output_type"`
+	PRUrl           string     `json:"pr_url,omitempty"`
+	InputTokens     int        `json:"input_tokens"`
+	OutputTokens    int        `json:"output_tokens"`
+	ErrorMsg        string     `json:"error_msg,omitempty"`
 	Output          string     `json:"output,omitempty"`
 	PendingQuestion string     `json:"pending_question,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
-	StartedAt    *time.Time `json:"started_at,omitempty"`
-	CompletedAt  *time.Time `json:"completed_at,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	StartedAt       *time.Time `json:"started_at,omitempty"`
+	CompletedAt     *time.Time `json:"completed_at,omitempty"`
 }
 
 // UserSettings holds per-user configurable tokens. Sensitive fields are stored
@@ -45,7 +46,30 @@ type UserSettings struct {
 	UpdatedAt       time.Time
 }
 
-// Store is the persistence interface. Swap sqlite → postgres without touching anything else.
+// AuditEvent records a single admin action for accountability. Written on every
+// user-management mutation (create, update, delete, activate/deactivate,
+// token regenerate/revoke) so "who did this and when" is answerable after the fact.
+type AuditEvent struct {
+	ID            string    `json:"id"`
+	ActorID       string    `json:"actor_id"`
+	ActorUsername string    `json:"actor_username,omitempty"`
+	Action        string    `json:"action"`
+	TargetID      string    `json:"target_id,omitempty"`
+	Detail        string    `json:"detail,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+// RepoIndexEntry is a cached structural summary of a repository at a specific
+// commit, so a task doesn't need to re-scan/re-parse the same repo content
+// every time it operates on the same commit.
+type RepoIndexEntry struct {
+	RepoID    string          `json:"repo_id"`
+	CommitSHA string          `json:"commit_sha"`
+	Summary   json.RawMessage `json:"summary"`
+	IndexedAt time.Time       `json:"indexed_at"`
+}
+
+// Store is the persistence interface. Swap implementations without touching callers.
 type Store interface {
 	// Users
 	CreateUser(ctx context.Context, username, tokenHash, role string) (*User, error)
@@ -72,6 +96,17 @@ type Store interface {
 	// User settings
 	GetUserSettings(ctx context.Context, userID string) (*UserSettings, error)
 	UpsertUserSettings(ctx context.Context, s *UserSettings) error
+
+	// Audit
+	RecordAuditEvent(ctx context.Context, actorID, actorUsername, action, targetID, detail string) error
+	ListAuditEvents(ctx context.Context, limit int) ([]*AuditEvent, error)
+
+	// Repo index — cached structural summaries of a repo at a given commit.
+	// GetRepoIndex returns (nil, nil) on a cache miss — a missing entry is
+	// not an error condition, it just means the caller should parse fresh
+	// and call SaveRepoIndex.
+	GetRepoIndex(ctx context.Context, repoID, commitSHA string) (*RepoIndexEntry, error)
+	SaveRepoIndex(ctx context.Context, repoID, commitSHA string, summary json.RawMessage) error
 
 	// Ping verifies the database connection is alive.
 	Ping(ctx context.Context) error

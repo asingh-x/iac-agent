@@ -18,7 +18,7 @@ func TestMemoryQueue_PushPop(t *testing.T) {
 		t.Errorf("Len = %d, want 1", q.Len())
 	}
 
-	got, err := q.Pop(ctx)
+	got, _, err := q.Pop(ctx)
 	if err != nil {
 		t.Fatalf("Pop: %v", err)
 	}
@@ -39,7 +39,7 @@ func TestMemoryQueue_FIFO(t *testing.T) {
 	}
 
 	for _, want := range []string{"first", "second", "third"} {
-		got, err := q.Pop(ctx)
+		got, _, err := q.Pop(ctx)
 		if err != nil {
 			t.Fatalf("Pop: %v", err)
 		}
@@ -67,7 +67,7 @@ func TestMemoryQueue_PopCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	_, err := q.Pop(ctx)
+	_, _, err := q.Pop(ctx)
 	if err == nil {
 		t.Error("expected context cancellation error on empty queue pop")
 	}

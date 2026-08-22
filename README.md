@@ -1,4 +1,4 @@
-# tf-agent
+# iac-agent
 
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Go](https://img.shields.io/badge/go-1.25-00ADD8)
@@ -11,7 +11,7 @@ The server is the core of the system. The client can be a web app, a CLI, or a b
 
 ## Table of contents
 
-- [Why tf-agent?](#why-tf-agent)
+- [Why iac-agent?](#why-iac-agent)
 - [Features](#features)
 - [Architecture](#architecture)
 - [How it stays fast](#how-it-stays-fast)
@@ -31,11 +31,11 @@ The server is the core of the system. The client can be a web app, a CLI, or a b
 
 ---
 
-## Why tf-agent?
+## Why iac-agent?
 
-Every time you ask ChatGPT or Claude to write Terraform, **you become the bottleneck** — copy the output, run the linter, fix the error, paste it back, repeat. tf-agent removes you from the execution loop entirely.
+Every time you ask ChatGPT or Claude to write Terraform, **you become the bottleneck** — copy the output, run the linter, fix the error, paste it back, repeat. iac-agent removes you from the execution loop entirely.
 
-| | ChatGPT / Claude | tf-agent |
+| | ChatGPT / Claude | iac-agent |
 |---|---|---|
 | Writes Terraform HCL | ✓ | ✓ |
 | Runs `terraform validate` | ✗ — you do it | ✓ automatic |
@@ -153,7 +153,7 @@ flowchart TD
 
 ## Infrastructure setup
 
-tf-agent ships with one-command Docker infra bootstrap — no docker-compose needed.
+iac-agent ships with one-command Docker infra bootstrap — no docker-compose needed.
 
 ```bash
 # Start Postgres 16 + NATS 2.10 (JetStream) containers
@@ -244,8 +244,8 @@ model  = "us.anthropic.claude-opus-4-6-20251101-v1:0"
 ## Quick start
 
 ```bash
-git clone https://github.com/tf-agent/tf-agent
-cd tf-agent
+git clone https://github.com/asingh-x/iac-agent
+cd iac-agent
 
 # Set your API key
 export ANTHROPIC_API_KEY=sk-...
@@ -258,7 +258,7 @@ Open [http://localhost:8080](http://localhost:8080) and log in with the admin to
 
 ## Configuration
 
-tf-agent is configured via a TOML file at `~/.tf-agent/config.toml`. Copy the sample and edit:
+iac-agent is configured via a TOML file at `~/.tf-agent/config.toml`. Copy the sample and edit:
 
 ```bash
 cp config.sample.toml ~/.tf-agent/config.toml
@@ -277,7 +277,10 @@ model = "claude-opus-4-6"
 api_key = ""                  # leave empty — use ANTHROPIC_API_KEY env var instead
 
 [permissions]
-default = "auto"              # auto | confirm | deny
+default = "auto"              # auto | confirm | deny — fallback for skills/tools not listed individually
+bash    = "confirm"           # destructive tools (bash/write/edit) default to confirm; everything else defaults to auto
+write   = "confirm"
+edit    = "confirm"
 
 [agent]
 wait_for_input_timeout = 604800  # seconds before a paused task times out (default: 7 days)

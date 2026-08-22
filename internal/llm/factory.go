@@ -18,7 +18,7 @@ func NewProvider(cfg *config.Config) (Provider, error) {
 				"ANTHROPIC_API_KEY is not set — set it via environment variable or config.toml",
 			)
 		}
-		return NewAnthropicProvider(key, debug), nil
+		return NewCircuitBreakerProvider(NewAnthropicProvider(key, debug)), nil
 
 	case "bedrock":
 		region := cfg.Provider.Bedrock.Region
@@ -29,7 +29,11 @@ func NewProvider(cfg *config.Config) (Provider, error) {
 		if model == "" {
 			model = "us.anthropic.claude-sonnet-4-6-20251101-v1:0"
 		}
-		return NewBedrockProvider(region, model, debug)
+		p, err := NewBedrockProvider(region, model, debug)
+		if err != nil {
+			return nil, err
+		}
+		return NewCircuitBreakerProvider(p), nil
 
 	default:
 		return nil, fmt.Errorf("unknown provider %q — choose 'anthropic' or 'bedrock'", cfg.Provider.Name)

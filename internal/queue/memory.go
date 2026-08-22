@@ -28,12 +28,20 @@ func (q *MemoryQueue) Push(ctx context.Context, item Item) error {
 	}
 }
 
-func (q *MemoryQueue) Pop(ctx context.Context) (Item, error) {
+// noopDelivery is used by MemoryQueue: an in-memory channel has no
+// redelivery mechanism, so acknowledgment is a no-op.
+type noopDelivery struct{}
+
+func (noopDelivery) Ack() error    { return nil }
+func (noopDelivery) Nak() error    { return nil }
+func (noopDelivery) Extend() error { return nil }
+
+func (q *MemoryQueue) Pop(ctx context.Context) (Item, Delivery, error) {
 	select {
 	case item := <-q.ch:
-		return item, nil
+		return item, noopDelivery{}, nil
 	case <-ctx.Done():
-		return Item{}, ctx.Err()
+		return Item{}, nil, ctx.Err()
 	}
 }
 

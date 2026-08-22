@@ -44,7 +44,7 @@ func TestMemoryQueue_PopCancelled(t *testing.T) {
 	// Cancel immediately before calling Pop.
 	cancel()
 
-	_, err := q.Pop(ctx)
+	_, _, err := q.Pop(ctx)
 	if err == nil {
 		t.Fatal("expected cancellation error from Pop, got nil")
 	}
@@ -61,7 +61,7 @@ func TestMemoryQueue_PopCancelledMidWait(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := q.Pop(ctx)
+		_, _, err := q.Pop(ctx)
 		done <- err
 	}()
 
@@ -97,7 +97,7 @@ func TestMemoryQueue_Len(t *testing.T) {
 
 	// Pop 3 items; Len should track each removal.
 	for i := 4; i >= 2; i-- {
-		if _, err := q.Pop(ctx); err != nil {
+		if _, _, err := q.Pop(ctx); err != nil {
 			t.Fatalf("Pop: %v", err)
 		}
 		if n := q.Len(); n != i {
@@ -132,6 +132,31 @@ func TestMemoryQueue_PushCancelledContext(t *testing.T) {
 		if q.Len() != 0 {
 			t.Errorf("Push returned error but Len = %d, want 0", q.Len())
 		}
+	}
+}
+
+// TestMemoryQueue_DeliveryIsNoop verifies MemoryQueue's Delivery handle is a
+// harmless no-op (an in-memory channel has no redelivery mechanism to manage).
+func TestMemoryQueue_DeliveryIsNoop(t *testing.T) {
+	q := NewMemoryQueue(10)
+	ctx := context.Background()
+	_ = q.Push(ctx, Item{TaskID: "a"})
+
+	_, delivery, err := q.Pop(ctx)
+	if err != nil {
+		t.Fatalf("Pop: %v", err)
+	}
+	if delivery == nil {
+		t.Fatal("expected non-nil Delivery from Pop")
+	}
+	if err := delivery.Ack(); err != nil {
+		t.Errorf("Ack: unexpected error: %v", err)
+	}
+	if err := delivery.Nak(); err != nil {
+		t.Errorf("Nak: unexpected error: %v", err)
+	}
+	if err := delivery.Extend(); err != nil {
+		t.Errorf("Extend: unexpected error: %v", err)
 	}
 }
 
@@ -175,7 +200,7 @@ func TestMemoryQueue_ConcurrentPushPop(t *testing.T) {
 		go func() {
 			defer popWg.Done()
 			for i := 0; i < perWorker; i++ {
-				item, err := q.Pop(ctx)
+				item, _, err := q.Pop(ctx)
 				if err != nil {
 					t.Errorf("Pop: %v", err)
 					return

@@ -72,6 +72,25 @@ func TestWriteTool_BlockedPath(t *testing.T) {
 	}
 }
 
+func TestWriteTool_AbsolutePathOutsideCwdRejected(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	target := filepath.Join(outside, "pwned.tf")
+
+	tool := NewWriteTool(dir)
+	input, _ := json.Marshal(map[string]string{
+		"file_path": target,
+		"content":   "resource \"evil\" \"x\" {}",
+	})
+	_, err := tool.Execute(context.Background(), input)
+	if err == nil {
+		t.Fatal("expected error writing outside the task working directory")
+	}
+	if _, statErr := os.Stat(target); statErr == nil {
+		t.Fatal("file should not have been written outside cwd")
+	}
+}
+
 func TestWriteTool_MissingFilePath(t *testing.T) {
 	tool := NewWriteTool(t.TempDir())
 	input, _ := json.Marshal(map[string]string{"content": "data"})

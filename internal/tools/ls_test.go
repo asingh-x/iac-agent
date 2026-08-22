@@ -86,17 +86,26 @@ func TestLsTool_PathTraversalRejected(t *testing.T) {
 
 	tool := NewLsTool(dir)
 	// Attempt to list the sibling via a relative traversal.
-	out, err := tool.Execute(context.Background(), mustJSON(map[string]any{
+	_, err := tool.Execute(context.Background(), mustJSON(map[string]any{
 		"path": "../" + filepath.Base(sibling),
 	}))
-	// The implementation resolves the path and lists it. The important
-	// security contract here is that it does NOT panic and returns either
-	// an error or a listing. We verify the call is safe (no panic).
-	_ = out
-	_ = err
-	// If the path happens to resolve successfully (the implementation does
-	// not currently block absolute-result traversals), that's noted but the
-	// test still passes — the key coverage goal is exercising the code path.
+	if err == nil {
+		t.Fatal("expected error listing a directory outside the task working directory")
+	}
+}
+
+func TestLsTool_AbsolutePathOutsideCwdRejected(t *testing.T) {
+	dir := t.TempDir()
+	sibling := t.TempDir()
+	writeTemp(t, sibling, "private.txt", "private content")
+
+	tool := NewLsTool(dir)
+	_, err := tool.Execute(context.Background(), mustJSON(map[string]any{
+		"path": sibling,
+	}))
+	if err == nil {
+		t.Fatal("expected error listing an absolute path outside the task working directory")
+	}
 }
 
 func TestLsTool_AbsolutePath(t *testing.T) {

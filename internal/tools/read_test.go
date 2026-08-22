@@ -67,6 +67,20 @@ func TestReadTool_OffsetLimit(t *testing.T) {
 	}
 }
 
+func TestReadTool_AbsolutePathOutsideCwdRejected(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir() // a different temp dir, not under dir
+	secret := writeTemp(t, outside, "secret.txt", "top secret")
+
+	tool := NewReadTool(dir)
+	_, err := tool.Execute(context.Background(), mustJSON(map[string]any{
+		"file_path": secret,
+	}))
+	if err == nil {
+		t.Fatal("expected error reading a file outside the task working directory")
+	}
+}
+
 func TestReadTool_NonExistent(t *testing.T) {
 	dir := t.TempDir()
 	tool := NewReadTool(dir)

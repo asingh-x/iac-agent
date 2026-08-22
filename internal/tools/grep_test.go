@@ -86,17 +86,29 @@ func TestGrepTool_RelativePathOutsideCwd(t *testing.T) {
 	writeTemp(t, outsideDir, "external.txt", "external content\n")
 
 	tool := NewGrepTool(dir)
-	// Use a relative path that resolves outside cwd. The implementation
-	// resolves it via filepath.Join(cwd, path) and walks the result.
-	// This test verifies the call does not panic and returns a result —
-	// the security posture for grep's path arg is not currently restricted.
-	out, err := tool.Execute(context.Background(), mustJSON(map[string]any{
+	// A relative path that resolves outside cwd must be rejected.
+	_, err := tool.Execute(context.Background(), mustJSON(map[string]any{
 		"pattern": "external content",
 		"path":    "../" + filepath.Base(outsideDir),
 	}))
-	// Either an error or a valid (possibly matching) output is acceptable.
-	_ = out
-	_ = err
+	if err == nil {
+		t.Fatal("expected error searching a path outside the task working directory")
+	}
+}
+
+func TestGrepTool_AbsolutePathOutsideCwdRejected(t *testing.T) {
+	dir := t.TempDir()
+	outsideDir := t.TempDir()
+	writeTemp(t, outsideDir, "external.txt", "external content\n")
+
+	tool := NewGrepTool(dir)
+	_, err := tool.Execute(context.Background(), mustJSON(map[string]any{
+		"pattern": "external content",
+		"path":    outsideDir,
+	}))
+	if err == nil {
+		t.Fatal("expected error searching an absolute path outside the task working directory")
+	}
 }
 
 func TestGrepTool_CaseInsensitive(t *testing.T) {

@@ -33,9 +33,9 @@ export function Sidebar({
   const avatarLetter = userInfo?.username?.[0]?.toUpperCase() ?? "U";
 
   return (
-    <aside style={{
+    <aside className="sidebar" style={{
       width: 240, flexShrink: 0,
-      background: "var(--surface)", borderRight: "1px solid var(--border)",
+      background: "var(--sidebar-bg)", borderRight: "1px solid var(--border)",
       display: "flex", flexDirection: "column", overflow: "hidden",
     }}>
       {/* Brand */}
@@ -50,7 +50,7 @@ export function Sidebar({
           </svg>
         </div>
         <div>
-          <div className="sidebar-brand-name">tf-agent</div>
+          <div className="sidebar-brand-name">iac-agent</div>
           <div className="sidebar-brand-tag">Terraform automation</div>
         </div>
       </div>
@@ -66,7 +66,7 @@ export function Sidebar({
             fontSize: "var(--text-sm)", fontWeight: 500,
             color: activeView === "form" ? "var(--accent)" : "var(--text-3)",
             background: activeView === "form" ? "var(--accent-subtle)" : "transparent",
-            border: activeView === "form" ? "1px solid #f0c4b0" : "1px solid transparent",
+            border: activeView === "form" ? "1px solid var(--nav-active-border)" : "1px solid transparent",
             cursor: "pointer", transition: "background .12s, color .12s",
           }}
           onMouseEnter={e => { if (activeView !== "form") e.currentTarget.style.background = "var(--surface-2)"; }}
@@ -101,8 +101,11 @@ export function Sidebar({
         {menuOpen && (
           <div style={{
             position: "absolute", bottom: "100%", left: 12, right: 12,
-            background: "var(--surface)", border: "1px solid var(--border)",
-            borderRadius: 10, boxShadow: "0 -4px 20px rgba(0,0,0,.1)",
+            background: "var(--menu-bg)",
+            backdropFilter: "blur(20px) saturate(180%)",
+            WebkitBackdropFilter: "blur(20px) saturate(180%)",
+            border: "1px solid var(--border)",
+            borderRadius: 14, boxShadow: "0 -4px 20px rgba(0,0,0,.1)",
             overflow: "hidden", animation: "slideUp .15s ease",
           }}>
             {/* Username header */}
@@ -162,6 +165,7 @@ export function Sidebar({
 
         {/* User badge button */}
         <button
+          className="sidebar-user-btn"
           onClick={() => setMenuOpen((o) => !o)}
           style={{
             display: "flex", alignItems: "center", gap: 9,
@@ -210,7 +214,7 @@ function NavItem({ label, active, onClick, icon }: { label: string; active: bool
         fontSize: "var(--text-sm)", fontWeight: 500,
         color: active ? "var(--accent)" : "var(--text-3)",
         background: active ? "var(--accent-subtle)" : "transparent",
-        border: active ? "1px solid #f0c4b0" : "1px solid transparent",
+        border: active ? "1px solid var(--nav-active-border)" : "1px solid transparent",
         cursor: "pointer", transition: "background .12s, color .12s",
       }}
       onMouseEnter={e => { if (!active) e.currentTarget.style.background = "var(--surface-2, #f5f4f0)"; }}

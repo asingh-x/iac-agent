@@ -1,4 +1,4 @@
-# tf-agent — Claude Code Guide
+# iac-agent — Claude Code Guide
 
 ## Build & Run
 
@@ -24,7 +24,7 @@ tf-agent/
 │   ├── agent/             core LLM loop (loop.go, prompt.go, compact.go)
 │   ├── commands/          slash-command registry + handlers
 │   ├── config/            YAML config loader
-│   ├── db/                SQLite store interface (store.go) + impl (sqlite.go)
+│   ├── db/                Store interface (store.go) + Postgres impl (postgres.go) + versioned migrations (migrate.go, migrations/) + in-memory impl for tests (memory.go)
 │   ├── hooks/             pre/post-tool hook runner
 │   ├── llm/               provider abstraction (Anthropic, Bedrock, mock)
 │   ├── permissions/       tool allow/deny policy checker
@@ -55,9 +55,11 @@ tf-agent/
 
 ## Database
 
-SQLite file at `~/.tf-agent/tf-agent.db` by default. Schema in `internal/db/schema.sql`.
+PostgreSQL only (`internal/db/postgres.go`) — see `make infra` for local Postgres+NATS, `DB_URL` env var for the connection string. An in-memory store (`internal/db/memory.go`) exists for unit tests only.
 
-When adding a column to an existing table use `ALTER TABLE ADD COLUMN` in a migration — do not re-create tables.
+Schema changes go in a new file under `internal/db/migrations/`, named `NNNN_description.sql` with an incrementing zero-padded number (see `0001_init.sql`, `0002_audit_events.sql`). Migrations apply automatically and idempotently on process start (`internal/db/migrate.go`) — never edit an already-committed migration file, add a new one. When adding a column to an existing table, use `ALTER TABLE ADD COLUMN` in the new migration — do not re-create tables.
+
+See `docs/ARCHITECTURE.md` for the full request flow and security boundaries.
 
 ## Auth
 

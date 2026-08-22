@@ -72,7 +72,7 @@ export function AdminPage() {
           User Management
         </div>
         <div style={{ fontSize: "var(--text-sm)", color: "var(--text-3)", marginTop: 4 }}>
-          Create and manage users who can access tf-agent.
+          Create and manage users who can access iac-agent.
         </div>
       </div>
 
@@ -325,7 +325,7 @@ function NewTokenBanner({ username, token, onDone }: { username: string; token: 
       <div style={{
         display: "flex", alignItems: "center", gap: 8,
         background: "var(--code-bg, #1a1915)", borderRadius: 6, padding: "10px 14px",
-        fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)", color: "#e8e6df", wordBreak: "break-all",
+        fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)", color: "var(--code-text)", wordBreak: "break-all",
       }}>
         <span style={{ flex: 1 }}>{token}</span>
         <button className={`copy-btn${copied ? " copied" : ""}`} onClick={copy} style={{ flexShrink: 0, fontSize: 11 }}>

@@ -36,4 +36,9 @@ var (
 		Name: "tfagent_active_sse_connections",
 		Help: "Number of currently open SSE streaming connections.",
 	})
+
+	metricQueueDepth = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "tfagent_queue_depth",
+		Help: "Current number of pending items in a named queue.",
+	}, []string{"queue"})
 )

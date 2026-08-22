@@ -103,18 +103,27 @@ debug = false
 # ----------------------------------------------------------------------------
 # Controls whether the agent may run each tool automatically or must ask first.
 # Values:
-#   auto    — run without asking (default, recommended for server mode)
-#   confirm — pause and ask the user before each call (useful for development)
+#   auto    — run without asking
+#   confirm (alias: ask) — pause and ask the user before each call
 #   deny    — never allow this tool
+#
+# Destructive tools (bash, write, edit) default to "confirm" — they mutate the
+# filesystem or run arbitrary shell commands, so a human approves each call
+# unless you explicitly opt into "auto" here. Everything else (read-only
+# tools, and every skill in the RepoScan -> Generate -> Validate -> SecurityScan
+# -> CreatePR pipeline) defaults to auto — "default" is the fallback for any
+# of those, and setting it to "confirm" would pause the pipeline at every
+# single skill call.
 
 [permissions]
-bash    = "auto"
-write   = "auto"
-edit    = "auto"
+bash    = "confirm"
+write   = "confirm"
+edit    = "confirm"
 read    = "auto"
 glob    = "auto"
 grep    = "auto"
-default = "auto"   # fallback for any tool not listed above
+ls      = "auto"
+default = "auto"   # fallback for any tool/skill not listed above
 
 
 # ----------------------------------------------------------------------------

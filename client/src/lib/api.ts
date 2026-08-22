@@ -80,6 +80,14 @@ export async function answerTask(taskId: string, answer: string): Promise<void> 
   });
 }
 
+export async function respondToPermission(taskId: string, allow: boolean): Promise<void> {
+  await fetch(`/v1/tasks/${taskId}/permission`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ allow }),
+  });
+}
+
 export async function verifyToken(token: string): Promise<boolean> {
   const res = await fetch("/v1/tasks", {
     headers: { Authorization: `Bearer ${token}` },

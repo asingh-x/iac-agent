@@ -1,6 +1,8 @@
 # Binaries
 .bin/
 tf-agent
+/server
+/cmd/server/server
 
 # Client
 client/node_modules/
@@ -48,5 +50,7 @@ coverage.out
 *.swp
 *.swo
 
-# Other 
+# Other
 .claude
+.superpowers/
+docs/superpowers/

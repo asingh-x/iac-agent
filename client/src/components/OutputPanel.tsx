@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { OutputLine } from "../types";
+import type { OutputLine, PendingPermission } from "../types";
 import type { RunState } from "../hooks/useTaskRunner";
 
 const SPINNER_FRAMES = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
@@ -9,7 +9,9 @@ interface Props {
   state: RunState;
   prUrl: string | null;
   pendingQuestion?: string | null;
+  pendingPermission?: PendingPermission | null;
   onAnswer?: (answer: string) => void;
+  onPermissionResponse?: (allow: boolean) => void;
   onRetry?: () => void;
   onCancel?: () => void;
 }
@@ -58,7 +60,7 @@ function buildDisplayItems(lines: OutputLine[]): DisplayItem[] {
   return result;
 }
 
-export function OutputPanel({ output, state, prUrl, pendingQuestion, onAnswer, onRetry, onCancel }: Props) {
+export function OutputPanel({ output, state, prUrl, pendingQuestion, pendingPermission, onAnswer, onPermissionResponse, onRetry, onCancel }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [spinnerFrame, setSpinnerFrame] = useState(0);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -120,9 +122,16 @@ export function OutputPanel({ output, state, prUrl, pendingQuestion, onAnswer, o
         </div>
       </div>
 
-      {/* ── Chronological stream ──────────────────────────────────────────────── */}
+      {/* ── Chronological stream — styled like a real terminal session ────────── */}
       {items.length > 0 && (
-        <div className="card output-stream">
+        <div className="terminal-window">
+          <div className="terminal-titlebar">
+            <span className="terminal-dot red" />
+            <span className="terminal-dot yellow" />
+            <span className="terminal-dot green" />
+            <span className="terminal-title">iac-agent — task</span>
+          </div>
+          <div className="output-stream">
           {items.map((item) => {
             // ── Text block ──────────────────────────────────────────────────
             if (item.kind === "text") {
@@ -211,6 +220,7 @@ export function OutputPanel({ output, state, prUrl, pendingQuestion, onAnswer, o
 
             return null;
           })}
+          </div>
         </div>
       )}
 
@@ -262,6 +272,38 @@ export function OutputPanel({ output, state, prUrl, pendingQuestion, onAnswer, o
           </div>
           <div style={{ fontSize: "var(--text-xs)", color: "var(--text-3)", marginTop: 6 }}>
             ⌘ + Enter to send
+          </div>
+        </div>
+      )}
+
+      {/* ── Permission request — sticky prominent callout ─────────────────────── */}
+      {state === "waiting" && pendingPermission && (
+        <div className="waiting-callout">
+          <div className="waiting-callout-header">
+            <span className="waiting-callout-icon">!</span>
+            <span style={{ fontSize: "var(--text-sm)", fontWeight: 600, color: "var(--text)" }}>
+              Approve tool call: {pendingPermission.tool}
+            </span>
+          </div>
+          <p className="waiting-callout-question">
+            <code>{pendingPermission.preview}</code>
+          </p>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              className="btn btn-primary"
+              onClick={() => onPermissionResponse?.(true)}
+              style={{ whiteSpace: "nowrap" }}
+              autoFocus
+            >
+              Approve
+            </button>
+            <button
+              className="btn"
+              onClick={() => onPermissionResponse?.(false)}
+              style={{ whiteSpace: "nowrap" }}
+            >
+              Deny
+            </button>
           </div>
         </div>
       )}

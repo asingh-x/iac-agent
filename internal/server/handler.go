@@ -3,7 +3,9 @@ package server
 import (
 	"embed"
 	"encoding/json"
+	"fmt"
 	"io/fs"
+	"log"
 	"net/http"
 	"strings"
 
@@ -47,6 +49,19 @@ func (s *Server) totalQueueLen() int {
 		n += q.Len()
 	}
 	return n
+}
+
+// queueDepths returns the pending item count for every named queue, keyed by
+// queue name (e.g. "default"). It also updates the tfagent_queue_depth gauge
+// for each queue so /metrics stays in sync with the depths reported here.
+func (s *Server) queueDepths() map[string]int {
+	depths := make(map[string]int, len(s.queues))
+	for name, q := range s.queues {
+		n := q.Len()
+		depths[name] = n
+		metricQueueDepth.WithLabelValues(name).Set(float64(n))
+	}
+	return depths
 }
 
 // Handler returns the root http.Handler with all routes registered.
@@ -93,6 +108,7 @@ func (s *Server) Handler() http.Handler {
 	authed.HandleFunc("GET /v1/tasks/{id}", s.handleGetTask)
 	authed.HandleFunc("GET /v1/tasks/{id}/stream", s.handleStreamTask)
 	authed.HandleFunc("POST /v1/tasks/{id}/answer", s.handleAnswerTask)
+	authed.HandleFunc("POST /v1/tasks/{id}/permission", s.handlePermissionResponse)
 	authed.HandleFunc("POST /v1/tasks/{id}/cancel", s.handleCancelTask)
 
 	// Admin routes — registered directly on root mux so {id} path values work correctly
@@ -107,6 +123,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/admin/users/{id}/deactivate", authAdmin(s.handleSetUserActive))
 	mux.Handle("POST /v1/admin/users/{id}/token", authAdmin(s.handleRegenerateToken))
 	mux.Handle("DELETE /v1/admin/users/{id}/token", authAdmin(s.handleRevokeToken))
+	mux.Handle("GET /v1/admin/audit-log", authAdmin(s.handleListAuditLog))
 
 	mux.Handle("/v1/", authMiddleware(s.store, authed))
 
@@ -158,10 +175,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		code = http.StatusServiceUnavailable
 	}
 
+	depths := s.queueDepths()
+
 	writeJSON(w, code, map[string]any{
-		"status":    status,
-		"checks":    checks,
-		"queue_len": s.totalQueueLen(),
+		"status":      status,
+		"checks":      checks,
+		"queue_len":   s.totalQueueLen(),
+		"queue_depth": depths,
 	})
 }
 
@@ -375,6 +395,35 @@ func (s *Server) handleAnswerTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+func (s *Server) handlePermissionResponse(w http.ResponseWriter, r *http.Request) {
+	user := userFromContext(r.Context())
+	taskID := r.PathValue("id")
+
+	task, err := s.store.GetTask(r.Context(), taskID)
+	if err != nil || task == nil {
+		writeError(w, http.StatusNotFound, "task not found")
+		return
+	}
+	if task.UserID != user.ID && user.Role != "admin" {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+
+	var req struct {
+		Allow bool `json:"allow"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "allow (boolean) is required")
+		return
+	}
+
+	if err := s.runner.SendPermissionResponse(taskID, req.Allow); err != nil {
+		writeError(w, http.StatusConflict, "task is not waiting for a permission decision")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 	user := userFromContext(r.Context())
 	taskID := r.PathValue("id")
@@ -437,6 +486,11 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "username already exists")
 		return
 	}
+	actor := userFromContext(r.Context())
+	if err := s.store.RecordAuditEvent(r.Context(), actor.ID, actor.Username, "user.create", user.ID,
+		fmt.Sprintf("username=%s role=%s", user.Username, user.Role)); err != nil {
+		log.Printf("audit: failed to record user.create for %s: %v", user.ID, err)
+	}
 	writeJSON(w, http.StatusCreated, map[string]string{
 		"id":       user.ID,
 		"username": user.Username,
@@ -488,6 +542,11 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to update user")
 		return
 	}
+	actor := userFromContext(r.Context())
+	if err := s.store.RecordAuditEvent(r.Context(), actor.ID, actor.Username, "user.update", userID,
+		fmt.Sprintf("username=%s role=%s", req.Username, req.Role)); err != nil {
+		log.Printf("audit: failed to record user.update for %s: %v", userID, err)
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"id": userID, "username": req.Username, "role": req.Role})
 }
 
@@ -502,6 +561,10 @@ func (s *Server) handleRegenerateToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to update token")
 		return
 	}
+	actor := userFromContext(r.Context())
+	if err := s.store.RecordAuditEvent(r.Context(), actor.ID, actor.Username, "user.token_regenerate", userID, ""); err != nil {
+		log.Printf("audit: failed to record user.token_regenerate for %s: %v", userID, err)
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"token": rawToken})
 }
 
@@ -515,6 +578,9 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.DeleteUser(r.Context(), userID); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete user")
 		return
+	}
+	if err := s.store.RecordAuditEvent(r.Context(), self.ID, self.Username, "user.delete", userID, ""); err != nil {
+		log.Printf("audit: failed to record user.delete for %s: %v", userID, err)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -531,6 +597,13 @@ func (s *Server) handleSetUserActive(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to update user status")
 		return
 	}
+	action := "user.deactivate"
+	if active {
+		action = "user.activate"
+	}
+	if err := s.store.RecordAuditEvent(r.Context(), self.ID, self.Username, action, userID, ""); err != nil {
+		log.Printf("audit: failed to record %s for %s: %v", action, userID, err)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"active": active})
 }
 
@@ -545,7 +618,19 @@ func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to revoke token")
 		return
 	}
+	if err := s.store.RecordAuditEvent(r.Context(), self.ID, self.Username, "user.token_revoke", userID, ""); err != nil {
+		log.Printf("audit: failed to record user.token_revoke for %s: %v", userID, err)
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleListAuditLog(w http.ResponseWriter, r *http.Request) {
+	events, err := s.store.ListAuditEvents(r.Context(), 200)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list audit log")
+		return
+	}
+	writeJSON(w, http.StatusOK, events)
 }
 
 // --- Me ---
@@ -587,10 +672,10 @@ func (s *Server) handleUpdateMe(w http.ResponseWriter, r *http.Request) {
 // --- User settings ---
 
 type settingsResponse struct {
-	GitHubTokenSet     bool   `json:"github_token_set"`
-	AtlassianTokenSet  bool   `json:"atlassian_token_set"`
-	AtlassianDomain    string `json:"atlassian_domain"`
-	AtlassianEmail     string `json:"atlassian_email"`
+	GitHubTokenSet    bool   `json:"github_token_set"`
+	AtlassianTokenSet bool   `json:"atlassian_token_set"`
+	AtlassianDomain   string `json:"atlassian_domain"`
+	AtlassianEmail    string `json:"atlassian_email"`
 }
 
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {

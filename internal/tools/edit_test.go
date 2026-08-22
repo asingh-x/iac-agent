@@ -59,6 +59,29 @@ func TestEditTool_NotFound(t *testing.T) {
 	}
 }
 
+func TestEditTool_AbsolutePathOutsideCwdRejected(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	target := filepath.Join(outside, "victim.txt")
+	if err := os.WriteFile(target, []byte("original content\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewEditTool(dir)
+	_, err := tool.Execute(context.Background(), mustJSON(map[string]any{
+		"file_path":  target,
+		"old_string": "original",
+		"new_string": "tampered",
+	}))
+	if err == nil {
+		t.Fatal("expected error editing a file outside the task working directory")
+	}
+	data, _ := os.ReadFile(target)
+	if strings.Contains(string(data), "tampered") {
+		t.Fatal("file outside cwd should not have been modified")
+	}
+}
+
 func TestEditTool_Ambiguous(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "file.txt")

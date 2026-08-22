@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -44,13 +43,12 @@ func (t *LsTool) Execute(_ context.Context, input json.RawMessage) (string, erro
 
 	dir := t.cwd
 	if args.Path != "" {
-		if filepath.IsAbs(args.Path) {
-			dir = args.Path
-		} else {
-			dir = filepath.Join(t.cwd, args.Path)
+		var err error
+		dir, err = resolveScoped(t.cwd, args.Path)
+		if err != nil {
+			return "", fmt.Errorf("ls: %w", err)
 		}
 	}
-	dir = filepath.Clean(dir)
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {

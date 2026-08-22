@@ -35,6 +35,23 @@ func TestGlobTool_SimplePattern(t *testing.T) {
 	}
 }
 
+func TestGlobTool_AbsolutePathOutsideCwdRejected(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.go"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := NewGlobTool(dir)
+	_, err := tool.Execute(context.Background(), mustJSON(map[string]any{
+		"pattern": "*.go",
+		"path":    outside,
+	}))
+	if err == nil {
+		t.Fatal("expected error globbing an absolute path outside the task working directory")
+	}
+}
+
 func TestGlobTool_NoMatch(t *testing.T) {
 	dir := t.TempDir()
 	// No files at all in the temp dir matching *.rs

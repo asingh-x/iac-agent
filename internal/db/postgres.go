@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -10,53 +11,12 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-const postgresSchema = `
-CREATE TABLE IF NOT EXISTS users (
-    id          TEXT PRIMARY KEY,
-    username    TEXT UNIQUE NOT NULL,
-    token_hash  TEXT NOT NULL,
-    role        TEXT NOT NULL DEFAULT 'member',
-    active      BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS tasks (
-    id            TEXT PRIMARY KEY,
-    user_id       TEXT NOT NULL REFERENCES users(id),
-    status        TEXT NOT NULL DEFAULT 'queued',
-    input_type    TEXT NOT NULL,
-    input_text    TEXT NOT NULL,
-    output_type   TEXT NOT NULL,
-    pr_url        TEXT,
-    input_tokens  INTEGER NOT NULL DEFAULT 0,
-    output_tokens INTEGER NOT NULL DEFAULT 0,
-    error_msg     TEXT,
-    output        TEXT,
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    started_at       TIMESTAMPTZ,
-    completed_at     TIMESTAMPTZ,
-    pending_question TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id);
-CREATE INDEX IF NOT EXISTS idx_tasks_status  ON tasks(status);
-
-CREATE TABLE IF NOT EXISTS user_settings (
-    user_id          TEXT PRIMARY KEY REFERENCES users(id),
-    github_token     TEXT,
-    atlassian_token  TEXT,
-    atlassian_domain TEXT,
-    atlassian_email  TEXT,
-    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-`
-
 // PostgresStore implements Store using PostgreSQL.
 type PostgresStore struct {
 	db *sql.DB
 }
 
-// NewPostgres opens a connection pool to PostgreSQL and applies the schema.
+// NewPostgres opens a connection pool to PostgreSQL and applies any pending migrations.
 func NewPostgres(connStr string) (*PostgresStore, error) {
 	db, err := sql.Open("pgx", connStr)
 	if err != nil {
@@ -66,7 +26,7 @@ func NewPostgres(connStr string) (*PostgresStore, error) {
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(5 * time.Minute)
 
-	if _, err := db.Exec(postgresSchema); err != nil {
+	if err := runMigrations(context.Background(), db); err != nil {
 		return nil, fmt.Errorf("postgres migrate: %w", err)
 	}
 	return &PostgresStore{db: db}, nil
@@ -79,9 +39,12 @@ func (s *PostgresStore) Ping(ctx context.Context) error {
 }
 
 // TruncateForTest deletes all rows from all tables. Only call from tests.
-func (s *PostgresStore) TruncateForTest(t interface{ Helper(); Fatalf(string, ...any) }) {
+func (s *PostgresStore) TruncateForTest(t interface {
+	Helper()
+	Fatalf(string, ...any)
+}) {
 	t.Helper()
-	_, err := s.db.Exec(`TRUNCATE TABLE tasks, user_settings, users RESTART IDENTITY CASCADE`)
+	_, err := s.db.Exec(`TRUNCATE TABLE audit_events, tasks, user_settings, users, repo_index RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatalf("TruncateForTest: %v", err)
 	}
@@ -248,7 +211,7 @@ func (s *PostgresStore) GetTask(ctx context.Context, id string) (*Task, error) {
 func (s *PostgresStore) MarkStaleTasksFailed(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE tasks SET status='failed', error_msg='Server restarted while task was in progress'
-		 WHERE status IN ('running', 'queued', 'waiting_for_input')`)
+		 WHERE status IN ('running', 'queued', 'waiting_for_input') AND completed_at IS NULL`)
 	return err
 }
 
@@ -312,6 +275,63 @@ func (s *PostgresStore) UpsertUserSettings(ctx context.Context, us *UserSettings
 		nullStr(us.AtlassianDomain), nullStr(us.AtlassianEmail),
 	)
 	return err
+}
+
+// --- Audit ---
+
+func (s *PostgresStore) RecordAuditEvent(ctx context.Context, actorID, actorUsername, action, targetID, detail string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO audit_events (id, actor_id, actor_username, action, target_id, detail, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		uuid.NewString(), actorID, actorUsername, action, nullStr(targetID), nullStr(detail), time.Now().UTC(),
+	)
+	return err
+}
+
+func (s *PostgresStore) GetRepoIndex(ctx context.Context, repoID, commitSHA string) (*RepoIndexEntry, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT repo_id, commit_sha, summary, indexed_at FROM repo_index WHERE repo_id = $1 AND commit_sha = $2`,
+		repoID, commitSHA)
+	var e RepoIndexEntry
+	var raw string
+	err := row.Scan(&e.RepoID, &e.CommitSHA, &raw, &e.IndexedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	e.Summary = json.RawMessage(raw)
+	return &e, nil
+}
+
+func (s *PostgresStore) SaveRepoIndex(ctx context.Context, repoID, commitSHA string, summary json.RawMessage) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO repo_index (id, repo_id, commit_sha, summary, indexed_at)
+		 VALUES ($1, $2, $3, $4, $5)
+		 ON CONFLICT (repo_id, commit_sha) DO UPDATE SET summary = EXCLUDED.summary, indexed_at = EXCLUDED.indexed_at`,
+		uuid.NewString(), repoID, commitSHA, string(summary), time.Now().UTC(),
+	)
+	return err
+}
+
+func (s *PostgresStore) ListAuditEvents(ctx context.Context, limit int) ([]*AuditEvent, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, actor_id, COALESCE(actor_username,''), action, COALESCE(target_id,''), COALESCE(detail,''), created_at
+		 FROM audit_events ORDER BY created_at DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []*AuditEvent
+	for rows.Next() {
+		e := &AuditEvent{}
+		if err := rows.Scan(&e.ID, &e.ActorID, &e.ActorUsername, &e.Action, &e.TargetID, &e.Detail, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		events = append(events, e)
+	}
+	return events, rows.Err()
 }
 
 // --- helpers ---

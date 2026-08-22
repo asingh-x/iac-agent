@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -14,21 +15,26 @@ import (
 // Intended for unit tests only — data is not persisted.
 func NewMemoryStore() Store {
 	return &memStore{
-		users:    map[string]*User{},
-		tasks:    map[string]*Task{},
-		settings: map[string]*UserSettings{},
+		users:     map[string]*User{},
+		tasks:     map[string]*Task{},
+		settings:  map[string]*UserSettings{},
+		repoIndex: map[string]*RepoIndexEntry{},
 	}
 }
 
 type memStore struct {
-	mu       sync.Mutex
-	users    map[string]*User    // id → user
-	byHash   map[string]*User    // tokenHash → user
-	tasks    map[string]*Task
-	settings map[string]*UserSettings
+	mu        sync.Mutex
+	users     map[string]*User // id → user
+	byHash    map[string]*User // tokenHash → user
+	tasks     map[string]*Task
+	settings  map[string]*UserSettings
+	audit     []*AuditEvent
+	repoIndex map[string]*RepoIndexEntry // "repoID\x00commitSHA" → entry
 }
 
-func (s *memStore) Close() error { return nil }
+func repoIndexKey(repoID, commitSHA string) string { return repoID + "\x00" + commitSHA }
+
+func (s *memStore) Close() error                 { return nil }
 func (s *memStore) Ping(_ context.Context) error { return nil }
 
 // --- Users ---
@@ -266,7 +272,7 @@ func (s *memStore) MarkStaleTasksFailed(_ context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, t := range s.tasks {
-		if t.Status == "running" || t.Status == "queued" || t.Status == "waiting_for_input" {
+		if (t.Status == "running" || t.Status == "queued" || t.Status == "waiting_for_input") && t.CompletedAt == nil {
 			t.Status = "failed"
 			t.ErrorMsg = "Server restarted while task was in progress"
 		}
@@ -292,5 +298,57 @@ func (s *memStore) UpsertUserSettings(_ context.Context, us *UserSettings) error
 	cp := *us
 	cp.UpdatedAt = time.Now()
 	s.settings[us.UserID] = &cp
+	return nil
+}
+
+// --- Audit ---
+
+func (s *memStore) RecordAuditEvent(_ context.Context, actorID, actorUsername, action, targetID, detail string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.audit = append(s.audit, &AuditEvent{
+		ID:            uuid.New().String(),
+		ActorID:       actorID,
+		ActorUsername: actorUsername,
+		Action:        action,
+		TargetID:      targetID,
+		Detail:        detail,
+		CreatedAt:     time.Now(),
+	})
+	return nil
+}
+
+func (s *memStore) ListAuditEvents(_ context.Context, limit int) ([]*AuditEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*AuditEvent, 0, len(s.audit))
+	for i := len(s.audit) - 1; i >= 0 && len(out) < limit; i-- {
+		out = append(out, s.audit[i])
+	}
+	return out, nil
+}
+
+// --- Repo index ---
+
+func (s *memStore) GetRepoIndex(_ context.Context, repoID, commitSHA string) (*RepoIndexEntry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.repoIndex[repoIndexKey(repoID, commitSHA)]
+	if !ok {
+		return nil, nil
+	}
+	cp := *e
+	return &cp, nil
+}
+
+func (s *memStore) SaveRepoIndex(_ context.Context, repoID, commitSHA string, summary json.RawMessage) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.repoIndex[repoIndexKey(repoID, commitSHA)] = &RepoIndexEntry{
+		RepoID:    repoID,
+		CommitSHA: commitSHA,
+		Summary:   summary,
+		IndexedAt: time.Now(),
+	}
 	return nil
 }

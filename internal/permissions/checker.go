@@ -17,19 +17,30 @@ type Checker struct {
 	session map[string]Level // session-level overrides set via interactive prompts
 }
 
+// normalizeLevel maps a config string to a Level, accepting "confirm" as a
+// documented alias for "ask" so config.sample.toml / README examples using
+// either spelling behave identically.
+func normalizeLevel(s string) Level {
+	if s == "confirm" {
+		return LevelAsk
+	}
+	return Level(s)
+}
+
 // NewChecker creates a Checker from config.
 func NewChecker(cfg *config.PermissionsConfig) *Checker {
 	perTool := map[string]Level{
-		"bash":  Level(cfg.Bash),
-		"write": Level(cfg.Write),
-		"edit":  Level(cfg.Edit),
-		"read":  Level(cfg.Read),
-		"glob":  Level(cfg.Glob),
-		"grep":  Level(cfg.Grep),
+		"bash":  normalizeLevel(cfg.Bash),
+		"write": normalizeLevel(cfg.Write),
+		"edit":  normalizeLevel(cfg.Edit),
+		"read":  normalizeLevel(cfg.Read),
+		"glob":  normalizeLevel(cfg.Glob),
+		"grep":  normalizeLevel(cfg.Grep),
+		"ls":    normalizeLevel(cfg.Ls),
 	}
 	def := LevelAsk
 	if cfg.Default != "" {
-		def = Level(cfg.Default)
+		def = normalizeLevel(cfg.Default)
 	}
 	return &Checker{
 		perTool: perTool,

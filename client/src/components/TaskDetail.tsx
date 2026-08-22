@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { answerTask, cancelTask, getTask } from "../lib/api";
+import { answerTask, cancelTask, getTask, respondToPermission } from "../lib/api";
 import type { TaskDetail as TTaskDetail } from "../types";
+
+// The backend encodes a pending permission prompt into the same
+// pending_question field a normal clarifying question uses (see
+// awaitPermission in internal/server/task_runner.go), prefixed this way so
+// the client can tell the two apart and render Approve/Deny instead of a
+// free-text answer box.
+const PERMISSION_PREFIX = /^Approve\s+(\S+):\s([\s\S]*)$/;
 
 interface Props {
   taskId: string;
@@ -13,6 +20,7 @@ export function TaskDetail({ taskId, onBack }: Props) {
   const [answer, setAnswer] = useState("");
   const [sending, setSending] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [respondingPermission, setRespondingPermission] = useState(false);
   const answerRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -48,6 +56,19 @@ export function TaskDetail({ taskId, onBack }: Props) {
       setSending(false);
     }
   };
+
+  const handlePermissionResponse = async (allow: boolean) => {
+    if (respondingPermission) return;
+    setRespondingPermission(true);
+    try {
+      await respondToPermission(taskId, allow);
+      getTask(taskId).then(setTask).catch(() => {});
+    } finally {
+      setRespondingPermission(false);
+    }
+  };
+
+  const permissionMatch = task.pending_question?.match(PERMISSION_PREFIX);
 
   const cleanInput = task.input_text.replace(/^\[.*?\]\s*/g, "");
   const durationSec = task.started_at && task.completed_at
@@ -141,8 +162,41 @@ export function TaskDetail({ taskId, onBack }: Props) {
         </div>
       )}
 
+      {/* Permission request — survives refresh */}
+      {task.status === "waiting_for_input" && permissionMatch && (
+        <div className="card" style={{ borderColor: "var(--border)", animation: "slideUp .2s ease" }}>
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: "var(--text-sm)", fontWeight: 600, color: "var(--text)", marginBottom: 4 }}>
+              <span style={{ color: "var(--accent)", marginRight: 6 }}>!</span>
+              Approve tool call: {permissionMatch[1]}
+            </div>
+            <div style={{ fontSize: "var(--text-sm)", color: "var(--text-2)", whiteSpace: "pre-wrap", lineHeight: 1.6 }}>
+              <code>{permissionMatch[2]}</code>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              className="btn btn-primary"
+              onClick={() => handlePermissionResponse(true)}
+              disabled={respondingPermission}
+              style={{ whiteSpace: "nowrap" }}
+            >
+              Approve
+            </button>
+            <button
+              className="btn"
+              onClick={() => handlePermissionResponse(false)}
+              disabled={respondingPermission}
+              style={{ whiteSpace: "nowrap" }}
+            >
+              Deny
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Waiting for input — survives refresh */}
-      {task.status === "waiting_for_input" && task.pending_question && (
+      {task.status === "waiting_for_input" && !permissionMatch && task.pending_question && (
         <div className="card" style={{ borderColor: "var(--border)", animation: "slideUp .2s ease" }}>
           <div style={{ marginBottom: 16 }}>
             <div style={{ fontSize: "var(--text-sm)", fontWeight: 600, color: "var(--text)", marginBottom: 4 }}>

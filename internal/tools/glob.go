@@ -54,12 +54,11 @@ func (t *GlobTool) Execute(_ context.Context, input json.RawMessage) (string, er
 
 	searchDir := t.cwd
 	if args.Path != "" {
-		if filepath.IsAbs(args.Path) {
-			searchDir = args.Path
-		} else {
-			searchDir = filepath.Join(t.cwd, args.Path)
+		var err error
+		searchDir, err = resolveScoped(t.cwd, args.Path)
+		if err != nil {
+			return "", fmt.Errorf("glob: %w", err)
 		}
-		searchDir = filepath.Clean(searchDir)
 	}
 
 	fullPattern := filepath.Join(searchDir, args.Pattern)
@@ -68,18 +67,22 @@ func (t *GlobTool) Execute(_ context.Context, input json.RawMessage) (string, er
 		return "", fmt.Errorf("glob: %w", err)
 	}
 
-	if len(matches) == 0 {
-		return "No files found matching pattern", nil
-	}
-
-	// Make paths relative to cwd where possible.
+	// Make paths relative to cwd where possible, dropping any match that
+	// escapes the working directory via a ".."-containing pattern.
 	result := make([]string, 0, len(matches))
 	for _, m := range matches {
+		if !withinScope(t.cwd, m) {
+			continue
+		}
 		if rel, err := filepath.Rel(t.cwd, m); err == nil {
 			result = append(result, rel)
 		} else {
 			result = append(result, m)
 		}
+	}
+
+	if len(result) == 0 {
+		return "No files found matching pattern", nil
 	}
 
 	return strings.Join(result, "\n"), nil
