@@ -1171,3 +1171,26 @@ func TestDriftDetect_Execute_DriftDetected_RealTerraform(t *testing.T) {
 		t.Errorf("expected 'Drift detected', got: %q", out)
 	}
 }
+
+// TestDriftDetect_Execute_InitFails_SoftError proves an init failure returns
+// a soft (nil-error) message rather than propagating a Go error — an
+// invalid backend type fails deterministically with no network dependency.
+func TestDriftDetect_Execute_InitFails_SoftError(t *testing.T) {
+	requireTerraform(t)
+
+	dir := t.TempDir()
+	tf := "terraform {\n  backend \"invalid_backend_type\" {}\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "main.tf"), []byte(tf), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	s := &DriftDetectSkill{}
+	input, _ := json.Marshal(map[string]any{"path": dir})
+	out, err := s.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Execute should return a soft error message, not a Go error: %v", err)
+	}
+	if !strings.Contains(out, "terraform init failed") {
+		t.Errorf("expected soft init-failure message, got: %q", out)
+	}
+}
