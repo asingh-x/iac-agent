@@ -200,24 +200,24 @@ func TestNATSQueue_Len_IsPerQueueNotWholeStream(t *testing.T) {
 		t.Skip("NATS_URL not set — skipping NATS integration tests")
 	}
 
-	// Use test name as base to ensure fresh consumers on each test run.
-	baseName := "test-" + strings.Map(func(r rune) rune {
-		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' {
-			return r
-		}
-		return '-'
-	}, t.Name())
+	// Generate unique queue names with nanosecond timestamp, not just the
+	// sanitized test name, to avoid NATS consumer/stream state leaking from
+	// previous test runs (see chaos_test.go's chaosQueueName for the same pattern
+	// and rationale). Each test run creates fresh consumers with unique names.
+	nameA := fmt.Sprintf("lentest-a-%d", time.Now().UnixNano())
+	nameB := fmt.Sprintf("lentest-b-%d", time.Now().UnixNano())
 
-	qA, err := queue.NewNATSQueue(url, baseName+"-a", queue.DefaultNATSMaxMsgs)
+	qA, err := queue.NewNATSQueue(url, nameA, queue.DefaultNATSMaxMsgs)
 	if err != nil {
 		t.Fatalf("NewNATSQueue a: %v", err)
 	}
-	defer qA.Close()
-	qB, err := queue.NewNATSQueue(url, baseName+"-b", queue.DefaultNATSMaxMsgs)
+	t.Cleanup(func() { _ = qA.Close() })
+
+	qB, err := queue.NewNATSQueue(url, nameB, queue.DefaultNATSMaxMsgs)
 	if err != nil {
 		t.Fatalf("NewNATSQueue b: %v", err)
 	}
-	defer qB.Close()
+	t.Cleanup(func() { _ = qB.Close() })
 
 	ctx := context.Background()
 	if err := qA.Push(ctx, queue.Item{TaskID: "a1"}); err != nil {
