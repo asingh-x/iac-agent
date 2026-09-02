@@ -159,6 +159,13 @@ func main() {
 			if dsn == "" {
 				dsn = os.Getenv("DB_URL") // falls back to the same DSN the main Store uses
 			}
+			if dsn == "" {
+				// A TOML-only deployment (postgres_url set in config.toml,
+				// no DB_URL env var) already resolved pgURL above for the
+				// main Store — reuse that instead of failing the queue
+				// while the store started up fine.
+				dsn = pgURL
+			}
 			pq, err := queue.NewPostgresQueue(
 				dsn, name,
 				time.Duration(cfg.Server.PostgresQueueLeaseTTL)*time.Second,
@@ -172,6 +179,8 @@ func main() {
 			queues[name] = pq
 		}
 		logger.Info("queue connected", "driver", "postgres", "queues", strings.Join(queueNames, ", "))
+		logger.Warn("queue_driver=postgres is durable and safe for multiple replicas, but has no cross-pod control plane relay wired (only queue_driver=nats sets that up): answer/permission/cancel requests for a task will fail if load-balanced to a pod that doesn't own it. See docs/configuration.md's postgres queue driver section.",
+			"queues", strings.Join(queueNames, ", "))
 	default:
 		bufSize := cfg.Server.QueueBuffer
 		if bufSize <= 0 {
