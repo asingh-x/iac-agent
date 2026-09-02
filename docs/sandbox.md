@@ -77,7 +77,7 @@ sandboxing + real auth".
   (`docker image inspect <sandbox_image>`) and points at
   `make sandbox-build` if not.
 
-## Enabling it
+## Requirements
 
 The sandbox is now mandatory — there is no opt-out toggle. To use `Validate`
 and `SecurityScan`, you must have a reachable sandbox image.

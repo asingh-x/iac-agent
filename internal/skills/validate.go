@@ -67,10 +67,6 @@ func (s *ValidateSkill) Schema() json.RawMessage {
 }
 
 func (s *ValidateSkill) Execute(ctx context.Context, input json.RawMessage) (string, error) {
-	if s.executor == nil {
-		return "", fmt.Errorf("validate_terraform: no sandbox executor configured")
-	}
-
 	var args struct {
 		Path                 string `json:"path"`
 		RunTflint            *bool  `json:"run_tflint"`
@@ -78,6 +74,10 @@ func (s *ValidateSkill) Execute(ctx context.Context, input json.RawMessage) (str
 	}
 	if err := json.Unmarshal(input, &args); err != nil {
 		return "", fmt.Errorf("validate_terraform: invalid input: %w", err)
+	}
+
+	if s.executor == nil {
+		return "", fmt.Errorf("validate_terraform: no sandbox executor configured")
 	}
 
 	runTflint := true

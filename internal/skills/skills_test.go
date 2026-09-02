@@ -1083,9 +1083,9 @@ func TestSecurityScanSkill_NilExecutor_NoLongerFallsBackToHost(t *testing.T) {
 }
 
 func TestNewValidateSkill_NilExecutor_MatchesZeroValue(t *testing.T) {
-	// NewValidateSkill(nil) must behave exactly like &ValidateSkill{} — the
-	// zero value is what pre-sandbox callers (and skills_test.go's other
-	// cases above) already rely on.
+	// NewValidateSkill(nil) must behave exactly like &ValidateSkill{} —
+	// both are the nil-executor zero value that Execute treats as a hard
+	// error (see TestValidateSkill_NilExecutor_NoLongerFallsBackToHost).
 	s := NewValidateSkill(nil)
 	if s.executor != nil {
 		t.Fatalf("expected nil executor, got %#v", s.executor)

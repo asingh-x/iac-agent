@@ -148,7 +148,7 @@ infra-clean:
 	@echo "✓ Infra containers and volumes removed"
 
 ## sandbox-build — build the terraform/tflint/checkov sandbox image used by
-## internal/sandbox.DockerExecutor when server.sandbox_enabled = true
+## internal/sandbox.DockerExecutor (sandboxed execution is always on)
 sandbox-build:
 	docker build -f docker/sandbox/Dockerfile -t $(SANDBOX_IMAGE) .
 	@echo "✓ built $(SANDBOX_IMAGE) — see docs/sandbox.md"
@@ -158,7 +158,7 @@ doctor:
 	@echo "=== tf-agent doctor ==="
 	@echo -n "Go:            "; go version
 	@echo -n "Node:          "; node --version 2>/dev/null || echo "not found (required for UI)"
-	@echo -n "Docker:        "; docker --version 2>/dev/null || echo "not found (required for make infra)"
+	@echo -n "Docker:        "; docker --version 2>/dev/null || echo "not found (required — Validate/SecurityScan run in a sandbox container, and it's also needed for make infra)"
 	@echo -n "ANTHROPIC_KEY: "; [ -n "$$ANTHROPIC_API_KEY" ] && echo "set" || echo "NOT SET"
 	@echo -n "AWS creds:     "; aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "not configured"
 	@echo -n "govulncheck:   "; which govulncheck 2>/dev/null || echo "not found (go install golang.org/x/vuln/cmd/govulncheck@latest)"
@@ -168,5 +168,5 @@ doctor:
 	@echo -n "GITHUB_TOKEN:  "; [ -n "$$GITHUB_TOKEN" ] && echo "set" || echo "not set"
 	@echo -n "Postgres:      "; docker exec $(PG_CONTAINER) pg_isready -U $(PG_USER) 2>/dev/null && echo "running" || echo "not running (make infra)"
 	@echo -n "NATS:          "; docker inspect -f '{{.State.Status}}' $(NATS_CONTAINER) 2>/dev/null || echo "not running (make infra)"
-	@echo -n "sandbox image: "; docker image inspect $(SANDBOX_IMAGE) >/dev/null 2>&1 && echo "built locally ($(SANDBOX_IMAGE))" || echo "not built locally — fine, sandbox_enabled = true pulls the published image by default; run 'make sandbox-build' only if you want a local dev-loop build (see docs/sandbox.md)"
+	@echo -n "sandbox image: "; docker image inspect $(SANDBOX_IMAGE) >/dev/null 2>&1 && echo "built locally ($(SANDBOX_IMAGE))" || echo "not built locally — fine, sandboxing is always on and the published image is pulled by default; run 'make sandbox-build' only if you want a local dev-loop build (see docs/sandbox.md)"
 	@echo "=== done ==="
