@@ -179,7 +179,7 @@ func main() {
 			queues[name] = pq
 		}
 		logger.Info("queue connected", "driver", "postgres", "queues", strings.Join(queueNames, ", "))
-		logger.Warn("queue_driver=postgres is durable and safe for multiple replicas, but has no cross-pod control plane relay wired (only queue_driver=nats sets that up): answer/permission/cancel requests for a task will fail if load-balanced to a pod that doesn't own it. See docs/configuration.md's postgres queue driver section.",
+		logger.Warn("queue_driver=postgres's task queue itself is durable and shared safely across replicas, but has no cross-pod control plane relay wired (only queue_driver=nats sets that up): answer/permission/cancel requests AND live SSE streams for a task will fail or hang if load-balanced to a pod that doesn't own it. See docs/configuration.md's postgres queue driver section.",
 			"queues", strings.Join(queueNames, ", "))
 	default:
 		bufSize := cfg.Server.QueueBuffer

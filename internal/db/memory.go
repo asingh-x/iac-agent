@@ -31,7 +31,7 @@ type memStore struct {
 	settings  map[string]*UserSettings
 	audit     []*AuditEvent
 	repoIndex map[string]*RepoIndexEntry // "repoID\x00commitSHA" → entry
-	runEvents map[string][]RunEvent       // taskID → events
+	runEvents map[string][]RunEvent      // taskID → events
 }
 
 func repoIndexKey(repoID, commitSHA string) string { return repoID + "\x00" + commitSHA }
