@@ -74,10 +74,21 @@ make infra-clean
 | Variable | Default | Description |
 |---|---|---|
 | `DB_URL` | — | **Required.** Postgres DSN: `postgres://user:pass@host:5432/db?sslmode=disable` |
-| `QUEUE_DRIVER` | `memory` | `memory` or `nats` |
-| `NATS_URL` | `nats://127.0.0.1:4222` | NATS server URL |
+| `QUEUE_DRIVER` | `memory` | `memory`, `nats`, or `postgres` |
+| `NATS_URL` | `nats://127.0.0.1:4222` | NATS server URL (used when `QUEUE_DRIVER=nats`) |
+| `POSTGRES_QUEUE_DSN` | — | Postgres DSN for the queue (used when `QUEUE_DRIVER=postgres`); defaults to `DB_URL` if unset |
+| `POSTGRES_QUEUE_LEASE_TTL` | `30s` | How long a task lease is valid before expiry and requeue (used when `QUEUE_DRIVER=postgres`) |
+| `POSTGRES_QUEUE_MAX_ATTEMPTS` | `3` | Max retry attempts before moving to dead-letter (used when `QUEUE_DRIVER=postgres`) |
 | `QUEUE_NAMES` | `default` | Comma-separated named queues — each gets its own worker goroutine (e.g. `default,security`) |
 | `TF_AGENT_ADMIN_TOKEN` | — | Bootstrap admin token on first run |
+
+### Queue driver selection
+
+Three queue drivers are available:
+
+- **`memory`** (default): In-memory queue; tasks are lost on restart. Only suitable for development and single-instance deployments.
+- **`nats`**: Durable, clustered NATS JetStream queue. Requires a separate NATS infrastructure (see `NATS_URL`).
+- **`postgres`**: Durable leased task queue backed by Postgres. No separate infrastructure needed — Postgres, which you already require for state storage, also owns the queue. Task leases, retries with backoff, and dead-letter tracking are all handled via the `task_queue` table. **Pick this for on-premises deployments** where you want durable execution without adding a new service dependency.
 
 ### Tests
 
