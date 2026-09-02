@@ -231,3 +231,36 @@ func TestFailTasksOlderThan_OnlyReconcilesGenuinelyOldRows(t *testing.T) {
 		t.Errorf("old completed task status = %q, want unchanged (done) — must not retroactively fail an already-completed task", gotOldCompleted.Status)
 	}
 }
+
+func TestMemStore_RunEvents_AppendAndGetSince(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := context.Background()
+
+	seq1, err := store.AppendRunEvent(ctx, "task-1", "text", json.RawMessage(`{"text":"a"}`))
+	if err != nil {
+		t.Fatalf("AppendRunEvent: %v", err)
+	}
+	seq2, err := store.AppendRunEvent(ctx, "task-1", "text", json.RawMessage(`{"text":"b"}`))
+	if err != nil {
+		t.Fatalf("AppendRunEvent: %v", err)
+	}
+	if seq2 <= seq1 {
+		t.Fatalf("seq2 (%d) should be greater than seq1 (%d)", seq2, seq1)
+	}
+
+	events, err := store.GetRunEventsSince(ctx, "task-1", seq1)
+	if err != nil {
+		t.Fatalf("GetRunEventsSince: %v", err)
+	}
+	if len(events) != 1 || events[0].Seq != seq2 {
+		t.Fatalf("expected exactly the event after seq1, got: %+v", events)
+	}
+
+	all, err := store.GetRunEventsSince(ctx, "task-1", 0)
+	if err != nil {
+		t.Fatalf("GetRunEventsSince: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("expected both events from seq 0, got %d", len(all))
+	}
+}

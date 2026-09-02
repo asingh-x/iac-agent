@@ -19,6 +19,7 @@ func NewMemoryStore() Store {
 		tasks:     map[string]*Task{},
 		settings:  map[string]*UserSettings{},
 		repoIndex: map[string]*RepoIndexEntry{},
+		runEvents: map[string][]RunEvent{},
 	}
 }
 
@@ -30,6 +31,7 @@ type memStore struct {
 	settings  map[string]*UserSettings
 	audit     []*AuditEvent
 	repoIndex map[string]*RepoIndexEntry // "repoID\x00commitSHA" → entry
+	runEvents map[string][]RunEvent       // taskID → events
 }
 
 func repoIndexKey(repoID, commitSHA string) string { return repoID + "\x00" + commitSHA }
@@ -370,4 +372,28 @@ func (s *memStore) SaveRepoIndex(_ context.Context, repoID, commitSHA string, su
 		IndexedAt: time.Now(),
 	}
 	return nil
+}
+
+// --- Run events ---
+
+func (s *memStore) AppendRunEvent(_ context.Context, taskID, eventType string, payload json.RawMessage) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seq := int64(len(s.runEvents[taskID]) + 1)
+	s.runEvents[taskID] = append(s.runEvents[taskID], RunEvent{
+		Seq: seq, Type: eventType, Payload: payload, CreatedAt: time.Now(),
+	})
+	return seq, nil
+}
+
+func (s *memStore) GetRunEventsSince(_ context.Context, taskID string, sinceSeq int64) ([]RunEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []RunEvent
+	for _, ev := range s.runEvents[taskID] {
+		if ev.Seq > sinceSeq {
+			out = append(out, ev)
+		}
+	}
+	return out, nil
 }

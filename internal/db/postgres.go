@@ -463,6 +463,46 @@ func (s *PostgresStore) ListAuditEvents(ctx context.Context, limit int) ([]*Audi
 	return events, err
 }
 
+// --- Run events ---
+
+func (s *PostgresStore) AppendRunEvent(ctx context.Context, taskID, eventType string, payload json.RawMessage) (int64, error) {
+	var seq int64
+	err := s.withRetry(ctx, func() error {
+		return s.db.QueryRowContext(ctx,
+			`INSERT INTO run_events (task_id, event_type, payload) VALUES ($1, $2, $3) RETURNING id`,
+			taskID, eventType, string(payload),
+		).Scan(&seq)
+	})
+	return seq, err
+}
+
+func (s *PostgresStore) GetRunEventsSince(ctx context.Context, taskID string, sinceSeq int64) ([]RunEvent, error) {
+	var events []RunEvent
+	err := s.withRetry(ctx, func() error {
+		events = nil // reset in case a prior attempt partially iterated before failing
+		rows, err := s.db.QueryContext(ctx,
+			`SELECT id, event_type, payload, created_at FROM run_events WHERE task_id = $1 AND id > $2 ORDER BY id`,
+			taskID, sinceSeq,
+		)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var ev RunEvent
+			var rawPayload string
+			if err := rows.Scan(&ev.Seq, &ev.Type, &rawPayload, &ev.CreatedAt); err != nil {
+				return err
+			}
+			ev.Payload = json.RawMessage(rawPayload)
+			events = append(events, ev)
+		}
+		return rows.Err()
+	})
+	return events, err
+}
+
 // --- helpers ---
 
 // scanner is satisfied by *sql.Row and *sql.Rows.

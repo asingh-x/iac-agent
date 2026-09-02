@@ -67,6 +67,19 @@ type Runner struct {
 	// gone quiet, so userSems doesn't grow forever across the process
 	// lifetime. Always accessed under userSemMu, same as userSems itself.
 	userSemLastUsed map[string]time.Time
+	// userSemPaused counts, per userID, how many of that user's tasks
+	// currently have an open pause — i.e. have handed their per-user slot
+	// back to userSems for the duration of an ask_user/permission wait (see
+	// pauseGate). sweepIdleUserSemaphores must not reap an entry with a
+	// non-zero count: such an entry's channel is legitimately empty even
+	// though a task is still conceptually occupying that slot and will
+	// reacquire it, and reaping it would let the user's next task build a
+	// fresh full-capacity channel and exceed PerUserConcurrency. Only
+	// tracked for users who actually have a per-user semaphore (limiting
+	// enabled), and entries are deleted as they return to zero so this map
+	// doesn't outgrow the one it guards. Always accessed under userSemMu,
+	// same as userSems itself.
+	userSemPaused map[string]int
 
 	// inFlight tracks running task goroutines, for graceful shutdown.
 	// draining guards a real race: sync.WaitGroup forbids a concurrent Add
@@ -246,14 +259,135 @@ func (r *Runner) SendPermissionResponse(taskID string, allow bool) error {
 	return nil
 }
 
+// pauseGate depth-counts concurrent "parked waiting for human input" pauses
+// on a single task, so the underlying LLM-concurrency semaphore(s) are
+// released exactly once when the first such pause begins and reacquired
+// exactly once when the last one ends — no matter how many pauses on this
+// task are open at once.
+//
+// This exists because a single LLM turn can batch an ask_user tool call
+// together with another tool call that needs permission (e.g. bash), and
+// internal/agent/loop.go's executeTools fans multiple tool calls from one
+// turn into parallel goroutines. Both the AskUser callback (run from the
+// ask_user tool's own fanned-out goroutine) and awaitPermission (run
+// synchronously from Runner.run's own event-loop goroutine) can therefore be
+// "open" concurrently for the SAME task, even though that task only ever
+// acquired one token from sem and one from userSem at the top of run(). A
+// naive release/reacquire at each pause site independently would
+// double-release a token this task doesn't have a second copy of: either
+// silently stealing another task's slot elsewhere on the pod (breaking the
+// concurrency-limit invariant), or — if nothing else is available to steal —
+// blocking forever on a bare channel receive with no cancellation escape,
+// hanging Runner.run's event loop for this task unrecoverably. pauseGate
+// makes overlapping pauses on one task share a single release/reacquire
+// pair instead, which is safe for any number of concurrent pauses (2, 3, or
+// N): the first one in does the real release, the last one out does the
+// real reacquire, and everything in between is a no-op depth change.
+type pauseGate struct {
+	sem     chan struct{}
+	userSem chan struct{} // nil if PerUserConcurrency limiting is disabled
+
+	// runner and userID let release/reacquire maintain
+	// Runner.userSemPaused, which is what stops sweepIdleUserSemaphores from
+	// reaping this user's semaphore entry while it sits empty for the
+	// duration of a pause. Both are only meaningful when userSem is non-nil
+	// (per-user limiting enabled); a nil runner disables the bookkeeping
+	// entirely, for tests that drive a pauseGate in isolation.
+	runner *Runner
+	userID string
+
+	mu    sync.Mutex
+	depth int
+}
+
+// release drops this task's concurrency slot(s) back to the shared pool the
+// first time it's called while no other pause on this task is open ("first
+// one in"); an overlapping call just increments the depth counter.
+func (g *pauseGate) release() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.depth++
+	if g.depth == 1 {
+		// Record the open pause BEFORE handing the per-user token back, so
+		// there is never an instant in which the user's channel is empty and
+		// no pause is recorded — that instant is exactly what
+		// sweepIdleUserSemaphores would misread as "idle, nobody using it".
+		g.trackPause(+1)
+		<-g.sem
+		if g.userSem != nil {
+			<-g.userSem
+		}
+	}
+}
+
+// reacquire is release's counterpart: it only takes the slot(s) back once
+// the last overlapping pause on this task ends ("last one out").
+//
+// The sends below are deliberately unbounded, and their safety rests on an
+// invariant rather than on a timeout: this task released exactly one token
+// from each channel in release(), so each channel has room reserved for
+// exactly this send and it cannot block for long. Anything that breaks that
+// one-release-per-reacquire pairing (a second release path added outside
+// pauseGate, or a channel swapped out mid-pause — see
+// sweepIdleUserSemaphores, which must not reap an entry with an open pause
+// for precisely this reason) turns these into an unbounded block with no
+// cancellation escape. Adding a timeout here is NOT the fix: abandoning the
+// send would silently shrink the pool's capacity for the rest of the
+// process's life. Preserve the invariant instead.
+func (g *pauseGate) reacquire() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.depth--
+	if g.depth == 0 {
+		g.sem <- struct{}{}
+		if g.userSem != nil {
+			g.userSem <- struct{}{}
+		}
+		// Mirror of release's ordering: clear the open pause only after the
+		// token is back in the channel, so the two conditions never both
+		// read "unused" at once.
+		g.trackPause(-1)
+	}
+}
+
+// trackPause adjusts this task's user's open-pause count by delta. A no-op
+// when there is no per-user semaphore to protect (limiting disabled) or no
+// Runner to record against. Callers hold g.mu; this takes Runner.userSemMu,
+// which is only ever acquired for short map updates and never while holding
+// g.mu elsewhere, so there is no lock cycle.
+func (g *pauseGate) trackPause(delta int) {
+	if g.userSem == nil || g.runner == nil {
+		return
+	}
+	r := g.runner
+	r.userSemMu.Lock()
+	defer r.userSemMu.Unlock()
+	n := r.userSemPaused[g.userID] + delta
+	if n <= 0 {
+		delete(r.userSemPaused, g.userID)
+		return
+	}
+	r.userSemPaused[g.userID] = n
+}
+
 // awaitPermission pauses the task on a "confirm this tool call" prompt: it
 // publishes a permission_request SSE event and blocks until the user
 // responds via SendPermissionResponse, the wait times out (denies, since
 // timing out on a destructive-tool confirmation should not silently allow
 // it), or the task's context is cancelled (denies).
-func (r *Runner) awaitPermission(ctx context.Context, taskID string, req *agent.PermissionRequest, waitTimeoutSeconds int, ch <-chan bool, waitingForInput *int32) bool {
+func (r *Runner) awaitPermission(ctx context.Context, taskID string, req *agent.PermissionRequest, waitTimeoutSeconds int, ch <-chan bool, waitingForInput *int32, release func(), reacquire func()) bool {
 	atomic.StoreInt32(waitingForInput, 1)
 	defer atomic.StoreInt32(waitingForInput, 0)
+
+	// Release concurrency slots while parked on an approve/deny prompt, for
+	// the same reason as the AskUser callback in Runner.run. release/
+	// reacquire are Runner.run's pauseGate.release/pauseGate.reacquire
+	// methods, which depth-count concurrent pauses on the same task so this
+	// can safely overlap with a concurrent AskUser pause (see pauseGate's
+	// doc comment) without double-releasing a semaphore slot this task only
+	// acquired once.
+	release()
+	defer reacquire()
 
 	preview := previewToolInput(req.Input)
 
@@ -355,6 +489,7 @@ func NewRunner(hub *Hub, store db.Store, q queue.Queue, provider llm.Provider, c
 		cancels:          make(map[string]context.CancelFunc),
 		userSems:         make(map[string]chan struct{}),
 		userSemLastUsed:  make(map[string]time.Time),
+		userSemPaused:    make(map[string]int),
 	}
 }
 
@@ -384,13 +519,25 @@ var userSemSweepInterval = 10 * time.Minute
 // users with no dispatch activity in the last userSemIdleThreshold relative
 // to now, and returns how many it removed.
 //
-// It only ever removes an entry whose channel is currently empty (len ==
-// 0) — one with a task actively holding a slot right now is left alone
-// regardless of how old its timestamp looks (defense in depth; in practice
-// the timestamp is refreshed at the start of every dispatch attempt for
-// that user, in the same locked section as the lookup/create, so an
-// in-use entry's timestamp is always recent — see run()'s per-user
-// semaphore section).
+// It only ever removes an entry that no task is using: the channel must be
+// empty (len == 0) AND the user must have no open pause (see
+// Runner.userSemPaused). Both checks are load-bearing, for different
+// reasons:
+//
+//   - len(ch) > 0 covers a task actively holding a slot right now. Mostly
+//     defense in depth, since the timestamp is refreshed at the start of
+//     every dispatch attempt for that user, in the same locked section as
+//     the lookup/create, so an in-use entry's timestamp is normally recent
+//     (see run()'s per-user semaphore section).
+//   - userSemPaused > 0 covers a task that is paused waiting for human
+//     input and has therefore handed its slot back (see pauseGate). Here
+//     the timestamp argument above genuinely does not hold: a pause can
+//     last up to WaitForInputTimeout (7 days by default), far longer than
+//     userSemIdleThreshold, so a paused task's entry really can look both
+//     idle and unused. Reaping it would leave the paused task holding
+//     nothing and its eventual reacquire pushing into an abandoned
+//     channel, while the user's next task built a fresh, full-capacity one
+//     — quietly letting that user exceed PerUserConcurrency by a slot.
 //
 // Safe against a task starting for this user concurrently with a sweep:
 // the lookup-or-create-and-stamp sequence in run() and this function's
@@ -408,6 +555,11 @@ func (r *Runner) sweepIdleUserSemaphores(now time.Time) (removed int) {
 		}
 		if ch, ok := r.userSems[userID]; ok && len(ch) > 0 {
 			continue // a task currently holds a slot; leave this entry alone
+		}
+		if r.userSemPaused[userID] > 0 {
+			// A task is paused mid-run with its slot handed back, and will
+			// reacquire it against this exact channel.
+			continue
 		}
 		delete(r.userSems, userID)
 		delete(r.userSemLastUsed, userID)
@@ -544,12 +696,13 @@ func (r *Runner) run(ctx context.Context, item queue.Item, delivery queue.Delive
 	// since the per-task context.CancelFunc isn't registered in r.cancels
 	// until after this section, Shutdown's grace-period force-cancel can't
 	// even reach a task stuck here to unblock it.
+	var userSem chan struct{} // nil if PerUserConcurrency limiting is disabled
 	if limit := r.cfg.Server.PerUserConcurrency; limit > 0 {
 		r.userSemMu.Lock()
 		if _, ok := r.userSems[item.UserID]; !ok {
 			r.userSems[item.UserID] = make(chan struct{}, limit)
 		}
-		userSem := r.userSems[item.UserID]
+		userSem = r.userSems[item.UserID]
 		// Stamp "last used" in the same critical section as the lookup/
 		// create above — not after the select below acquires a slot — so
 		// sweepIdleUserSemaphores (also gated on r.userSemMu) can never see
@@ -585,6 +738,21 @@ func (r *Runner) run(ctx context.Context, item queue.Item, delivery queue.Delive
 		return
 	}
 	defer func() { <-r.sem }()
+
+	// pg depth-counts concurrent pauses on this task so overlapping pauses
+	// (e.g. an ask_user tool call batched with another tool call needing
+	// permission in the same LLM turn — internal/agent/loop.go's
+	// executeTools fans these out into parallel goroutines) share one
+	// release/reacquire of the underlying semaphore instead of each
+	// independently releasing/reacquiring, which would double-release a
+	// token this task only acquired once. See pauseGate's doc comment.
+	//
+	// runner/userID are what let it also record the pause in
+	// r.userSemPaused, so sweepIdleUserSemaphores doesn't mistake this
+	// user's momentarily-empty semaphore for an idle one and reap it
+	// out from under a pause that can legitimately outlast
+	// userSemIdleThreshold.
+	pg := &pauseGate{sem: r.sem, userSem: userSem, runner: r, userID: item.UserID}
 
 	// Create a per-task cancellable context so individual tasks can be stopped.
 	taskCtxCancel, cancel := context.WithCancel(ctx)
@@ -720,6 +888,18 @@ func (r *Runner) run(ctx context.Context, item queue.Item, delivery queue.Delive
 		atomic.StoreInt32(&waitingForInput, 1)
 		defer atomic.StoreInt32(&waitingForInput, 0)
 
+		// Release concurrency slots while parked on a human answer — an
+		// unanswered question (up to WaitForInputTimeout, 7 days by default)
+		// must not hold capacity that could serve other tasks. Goes through
+		// pg (a *pauseGate), not a direct channel release, because this
+		// callback can run concurrently with awaitPermission for the SAME
+		// task: a single LLM turn can batch an ask_user call together with
+		// another tool call that needs permission, and executeTools fans
+		// those out into parallel goroutines (internal/agent/loop.go). See
+		// pauseGate's doc comment.
+		pg.release()
+		defer pg.reacquire()
+
 		if err := r.store.UpdateTaskStatus(ctx, item.TaskID, "waiting_for_input"); err != nil {
 			r.logger.Error("failed to update task status", "task_id", item.TaskID, "status", "waiting_for_input", "err", err)
 		}
@@ -799,7 +979,7 @@ func (r *Runner) run(ctx context.Context, item queue.Item, delivery queue.Delive
 
 		case agent.TurnEventPermission:
 			if ev.PermissionRequest != nil {
-				ev.PermissionRequest.ResponseCh <- r.awaitPermission(ctx, item.TaskID, ev.PermissionRequest, waitTimeout, permissionCh, &waitingForInput)
+				ev.PermissionRequest.ResponseCh <- r.awaitPermission(ctx, item.TaskID, ev.PermissionRequest, waitTimeout, permissionCh, &waitingForInput, pg.release, pg.reacquire)
 			}
 
 		case agent.TurnEventError:
