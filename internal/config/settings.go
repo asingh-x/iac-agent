@@ -15,6 +15,9 @@ type ServerConfig struct {
 	PostgresURL         string `toml:"postgres_url"` // postgres://user:pass@host:5432/db?sslmode=disable
 	QueueDriver         string `toml:"queue_driver"` // memory (default) | nats
 	NatsURL             string `toml:"nats_url"`     // nats://host:4222
+	PostgresQueueDSN    string `toml:"postgres_queue_dsn"`          // defaults to DB_URL if empty
+	PostgresQueueLeaseTTL    int    `toml:"postgres_queue_lease_ttl"`    // seconds; default 300 (5 min, matches natsAckWait)
+	PostgresQueueMaxAttempts int    `toml:"postgres_queue_max_attempts"` // default 5, matches NATS's hardcoded MaxDeliver(5)
 	LLMConcurrency      int    `toml:"llm_concurrency"`
 	PerUserConcurrency  int    `toml:"per_user_concurrency"`
 	QueueBuffer         int    `toml:"queue_buffer"`
@@ -144,6 +147,8 @@ func Defaults() *Config {
 			PerUserConcurrency:      3,
 			QueueBuffer:             500,
 			NATSMaxMsgs:             5000, // NATS is durable and meant to hold more backlog than the in-memory QueueBuffer (500); keep in sync with queue.DefaultNATSMaxMsgs
+			PostgresQueueLeaseTTL:    300,  // 5 minutes, matches natsAckWait
+			PostgresQueueMaxAttempts: 5,    // matches NATS's hardcoded MaxDeliver(5)
 			ShutdownGracePeriod:     60,
 			StaleTaskMaxAge:         2 * 60 * 60, // 2 hours in seconds; ~4x Agent.MaxTaskDuration's own 30-minute default, see field comment
 			SemaphoreAcquireTimeout: 5 * 60,      // 5 minutes in seconds, see field comment
