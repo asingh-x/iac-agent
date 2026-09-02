@@ -1,7 +1,12 @@
 package server
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
+	"io"
 	"strings"
 	"testing"
 )
@@ -9,9 +14,14 @@ import (
 // resetKey clears the package-level encryption key for test isolation.
 func resetKey(t *testing.T) {
 	t.Helper()
-	prev := encryptionKey
-	t.Cleanup(func() { encryptionKey = prev })
-	encryptionKey = nil
+	prevCurrent := current
+	prevOldKeys := oldKeys
+	t.Cleanup(func() {
+		current = prevCurrent
+		oldKeys = prevOldKeys
+	})
+	current = keyEntry{}
+	oldKeys = map[string]keyEntry{}
 }
 
 func TestEncryptionKeyLoaded_FalseWhenNil(t *testing.T) {
@@ -83,7 +93,7 @@ func setTestKey(t *testing.T) {
 	for i := range key {
 		key[i] = byte(i + 1)
 	}
-	encryptionKey = key
+	current = keyEntry{id: "v1", key: key}
 }
 
 func TestEncryptDecryptRoundtrip(t *testing.T) {
@@ -179,7 +189,7 @@ func TestDecrypt_WrongKey(t *testing.T) {
 	for i := range newKey {
 		newKey[i] = byte(255 - i)
 	}
-	encryptionKey = newKey
+	current = keyEntry{id: "v1", key: newKey}
 
 	_, err = Decrypt(ciphertext)
 	if err == nil {
@@ -202,5 +212,305 @@ func TestDecrypt_NoKeyLoaded(t *testing.T) {
 	_, err := Decrypt("c29tZXRoaW5n") // valid base64, but no key
 	if err == nil {
 		t.Error("expected error from Decrypt when key is not loaded")
+	}
+}
+
+func TestLoadEncryptionKey_DefaultKeyID_NoPrefix(t *testing.T) {
+	resetKey(t)
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	if err := LoadEncryptionKey(); err != nil {
+		t.Fatalf("LoadEncryptionKey: %v", err)
+	}
+	if currentKeyID() != "v1" {
+		t.Errorf("currentKeyID() = %q, want %q (unprefixed env var defaults to v1)", currentKeyID(), "v1")
+	}
+}
+
+func TestLoadEncryptionKey_ExplicitKeyID(t *testing.T) {
+	resetKey(t)
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "v2:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	if err := LoadEncryptionKey(); err != nil {
+		t.Fatalf("LoadEncryptionKey: %v", err)
+	}
+	if currentKeyID() != "v2" {
+		t.Errorf("currentKeyID() = %q, want %q", currentKeyID(), "v2")
+	}
+}
+
+func TestLoadEncryptionKey_OldKeys(t *testing.T) {
+	resetKey(t)
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "v2:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	t.Setenv("TF_AGENT_ENCRYPTION_KEYS_OLD", "v1:202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f")
+	if err := LoadEncryptionKey(); err != nil {
+		t.Fatalf("LoadEncryptionKey: %v", err)
+	}
+	if !hasOldKey("v1") {
+		t.Error("expected old key v1 to be loaded")
+	}
+}
+
+func TestLoadEncryptionKey_MalformedOldKeyEntry_Errors(t *testing.T) {
+	resetKey(t)
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "v2:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	t.Setenv("TF_AGENT_ENCRYPTION_KEYS_OLD", "not-a-valid-entry")
+	if err := LoadEncryptionKey(); err == nil {
+		t.Error("expected an error for a malformed TF_AGENT_ENCRYPTION_KEYS_OLD entry, got nil")
+	}
+}
+
+func TestLoadEncryptionKey_WithTrailingWhitespace(t *testing.T) {
+	resetKey(t)
+	// Simulate file-based secret with trailing newline (common from kubectl create secret --from-file)
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20\n")
+	if err := LoadEncryptionKey(); err != nil {
+		t.Fatalf("LoadEncryptionKey with trailing newline: %v", err)
+	}
+	if !EncryptionKeyLoaded() {
+		t.Error("key with trailing whitespace should be loaded")
+	}
+	if currentKeyID() != "v1" {
+		t.Errorf("currentKeyID() = %q, want %q", currentKeyID(), "v1")
+	}
+}
+
+func TestLoadEncryptionKey_WithPrefixedKeyIDAndTrailingWhitespace(t *testing.T) {
+	resetKey(t)
+	// Versioned key with leading/trailing whitespace
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "  v2:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20  \n")
+	if err := LoadEncryptionKey(); err != nil {
+		t.Fatalf("LoadEncryptionKey with whitespace: %v", err)
+	}
+	if currentKeyID() != "v2" {
+		t.Errorf("currentKeyID() = %q, want %q", currentKeyID(), "v2")
+	}
+}
+
+// encryptRaw reproduces the pre-versioning ciphertext format (no keyID
+// prefix) directly, to prove Decrypt still handles data written before
+// this change existed.
+func encryptRaw(t *testing.T, key []byte, plaintext string) string {
+	t.Helper()
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatalf("aes.NewCipher: %v", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatalf("cipher.NewGCM: %v", err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		t.Fatalf("rand.Read nonce: %v", err)
+	}
+	sealed := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
+	return base64.StdEncoding.EncodeToString(sealed)
+}
+
+func TestEncrypt_PrefixesCurrentKeyID(t *testing.T) {
+	resetKey(t)
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "v3:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	if err := LoadEncryptionKey(); err != nil {
+		t.Fatalf("LoadEncryptionKey: %v", err)
+	}
+	ct, err := Encrypt("hello")
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	if !strings.HasPrefix(ct, "v3:") {
+		t.Errorf("ciphertext = %q, want it prefixed with %q", ct, "v3:")
+	}
+}
+
+func TestEncryptDecrypt_RoundTrip_NewFormat(t *testing.T) {
+	resetKey(t)
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "v1:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	if err := LoadEncryptionKey(); err != nil {
+		t.Fatalf("LoadEncryptionKey: %v", err)
+	}
+	ct, err := Encrypt("super secret token")
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	pt, err := Decrypt(ct)
+	if err != nil {
+		t.Fatalf("Decrypt: %v", err)
+	}
+	if pt != "super secret token" {
+		t.Errorf("Decrypt round-trip = %q, want %q", pt, "super secret token")
+	}
+}
+
+func TestDecrypt_LegacyNoPrefixCiphertext_StillWorks(t *testing.T) {
+	// Simulates a value encrypted by the pre-versioning code: raw
+	// base64(nonce||ciphertext) with no "keyID:" prefix at all — the exact
+	// format Encrypt produced before this plan shipped.
+	resetKey(t)
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "v1:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	if err := LoadEncryptionKey(); err != nil {
+		t.Fatalf("LoadEncryptionKey: %v", err)
+	}
+	// Produce a legacy-format ciphertext directly with the current key,
+	// bypassing Encrypt's new prefix, to simulate data written before this
+	// change existed.
+	legacy := encryptRaw(t, current.key, "pre-existing token")
+	pt, err := Decrypt(legacy)
+	if err != nil {
+		t.Fatalf("Decrypt legacy ciphertext: %v", err)
+	}
+	if pt != "pre-existing token" {
+		t.Errorf("Decrypt legacy = %q, want %q", pt, "pre-existing token")
+	}
+}
+
+func TestDecrypt_OldKeyAfterRotation(t *testing.T) {
+	resetKey(t)
+	// Encrypt with what will become the "old" key.
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "v1:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	if err := LoadEncryptionKey(); err != nil {
+		t.Fatalf("LoadEncryptionKey: %v", err)
+	}
+	ct, err := Encrypt("rotated token")
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+
+	// Rotate: v1 becomes old, v2 becomes current.
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "v2:202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f")
+	t.Setenv("TF_AGENT_ENCRYPTION_KEYS_OLD", "v1:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	if err := LoadEncryptionKey(); err != nil {
+		t.Fatalf("LoadEncryptionKey (post-rotation): %v", err)
+	}
+
+	pt, err := Decrypt(ct)
+	if err != nil {
+		t.Fatalf("Decrypt with old key after rotation: %v", err)
+	}
+	if pt != "rotated token" {
+		t.Errorf("Decrypt = %q, want %q", pt, "rotated token")
+	}
+
+	newCt, err := Encrypt("new token")
+	if err != nil {
+		t.Fatalf("Encrypt after rotation: %v", err)
+	}
+	if !strings.HasPrefix(newCt, "v2:") {
+		t.Errorf("post-rotation ciphertext = %q, want prefixed with %q", newCt, "v2:")
+	}
+}
+
+func TestEncryptDecrypt_EmptyString_Unchanged(t *testing.T) {
+	resetKey(t)
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "v1:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	if err := LoadEncryptionKey(); err != nil {
+		t.Fatalf("LoadEncryptionKey: %v", err)
+	}
+	ct, err := Encrypt("")
+	if err != nil || ct != "" {
+		t.Fatalf("Encrypt(\"\") = (%q, %v), want (\"\", nil)", ct, err)
+	}
+	pt, err := Decrypt("")
+	if err != nil || pt != "" {
+		t.Fatalf("Decrypt(\"\") = (%q, %v), want (\"\", nil)", pt, err)
+	}
+}
+
+func TestDecrypt_LegacyCiphertext_AfterRotation_FallsBackToOldKey(t *testing.T) {
+	// Reproduces the exact "first rotation" scenario from
+	// docs/configuration.md: a token was encrypted (and never re-saved)
+	// while its key was still current. After rotation that key moves to
+	// TF_AGENT_ENCRYPTION_KEYS_OLD and a new key becomes current, but the
+	// stored ciphertext is still prefix-less (legacy format) since it was
+	// never re-encrypted. Decrypt must still recover it by falling back
+	// through oldKeys instead of only ever trying the new current key.
+	resetKey(t)
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	if err := LoadEncryptionKey(); err != nil {
+		t.Fatalf("LoadEncryptionKey: %v", err)
+	}
+	// Produce a genuine legacy-format ciphertext (no keyID prefix) using the
+	// key that is about to become "old" -- this is what every pre-existing
+	// stored token looks like at the moment of rotation.
+	legacy := encryptRaw(t, current.key, "pre-rotation token")
+
+	// Rotate: the key that produced `legacy` (bare, defaults to id "v1")
+	// becomes old, a fresh key becomes current as "v2".
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "v2:202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f")
+	t.Setenv("TF_AGENT_ENCRYPTION_KEYS_OLD", "v1:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	if err := LoadEncryptionKey(); err != nil {
+		t.Fatalf("LoadEncryptionKey (post-rotation): %v", err)
+	}
+
+	pt, err := Decrypt(legacy)
+	if err != nil {
+		t.Fatalf("Decrypt legacy ciphertext after rotation: %v", err)
+	}
+	if pt != "pre-rotation token" {
+		t.Errorf("Decrypt = %q, want %q", pt, "pre-rotation token")
+	}
+}
+
+func TestDecrypt_LegacyCiphertext_NoMatchingKey_Errors(t *testing.T) {
+	// A legacy ciphertext that matches neither the current key nor any old
+	// key (e.g. encrypted under a key that has since been dropped entirely
+	// from TF_AGENT_ENCRYPTION_KEYS_OLD) must still fail loudly rather than
+	// silently mis-decrypting or panicking.
+	resetKey(t)
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "v2:202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f")
+	t.Setenv("TF_AGENT_ENCRYPTION_KEYS_OLD", "v1:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	if err := LoadEncryptionKey(); err != nil {
+		t.Fatalf("LoadEncryptionKey: %v", err)
+	}
+
+	orphanKey := make([]byte, 32)
+	for i := range orphanKey {
+		orphanKey[i] = byte(199 - i)
+	}
+	legacy := encryptRaw(t, orphanKey, "orphaned token")
+
+	if _, err := Decrypt(legacy); err == nil {
+		t.Error("expected error decrypting a legacy ciphertext that matches neither current nor any old key")
+	}
+}
+
+func TestLoadEncryptionKey_OldKeyIDCollidesWithCurrent_Errors(t *testing.T) {
+	// Both entries below are bare/unprefixed and so both default to id
+	// "v1" -- an easy configuration mistake. Decrypt always checks
+	// current.id first, so an old-key entry sharing that id would be
+	// silently shadowed and never actually used. This must be rejected at
+	// load time instead.
+	resetKey(t)
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	t.Setenv("TF_AGENT_ENCRYPTION_KEYS_OLD", "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f")
+
+	if err := LoadEncryptionKey(); err == nil {
+		t.Fatal("expected error when a bare old-key entry collides with the current (also bare, id v1) key")
+	}
+}
+
+func TestLoadEncryptionKey_OldKeyIDCollidesWithCurrent_ExplicitIDs_Errors(t *testing.T) {
+	resetKey(t)
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "v1:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	t.Setenv("TF_AGENT_ENCRYPTION_KEYS_OLD", "v1:202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f")
+
+	if err := LoadEncryptionKey(); err == nil {
+		t.Fatal("expected error when an explicit old-key id (v1) collides with the current key id (v1)")
+	}
+}
+
+func TestDecrypt_UnknownKeyID_Errors(t *testing.T) {
+	// A ciphertext referencing a key ID that is neither current nor in
+	// oldKeys must fail loudly rather than silently mis-decrypting or
+	// panicking.
+	resetKey(t)
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "v2:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	if err := LoadEncryptionKey(); err != nil {
+		t.Fatalf("LoadEncryptionKey: %v", err)
+	}
+	_, err := Decrypt("v99:c29tZS1jaXBoZXJ0ZXh0LWJsb2I=")
+	if err == nil {
+		t.Fatal("expected error decrypting a ciphertext with an unknown key id")
+	}
+	if !strings.Contains(err.Error(), "unknown encryption key id") {
+		t.Errorf("expected 'unknown encryption key id' in error, got: %v", err)
 	}
 }

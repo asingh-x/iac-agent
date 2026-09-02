@@ -829,11 +829,15 @@ func (r *Runner) run(ctx context.Context, item queue.Item, delivery queue.Delive
 		if githubToken == "" && us.GitHubToken != "" {
 			if dec, err := Decrypt(us.GitHubToken); err == nil {
 				githubToken = dec
+			} else {
+				r.logger.Warn("failed to decrypt stored github_token", "task_id", item.TaskID, "user_id", item.UserID, "err", err)
 			}
 		}
 		if atlassianToken == "" && us.AtlassianToken != "" {
 			if dec, err := Decrypt(us.AtlassianToken); err == nil {
 				atlassianToken = dec
+			} else {
+				r.logger.Warn("failed to decrypt stored atlassian_token", "task_id", item.TaskID, "user_id", item.UserID, "err", err)
 			}
 		}
 		if atlassianDomain == "" {
