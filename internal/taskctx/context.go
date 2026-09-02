@@ -24,6 +24,13 @@ type Credentials struct {
 	AtlassianToken  string
 	AtlassianDomain string // e.g. mycompany.atlassian.net
 	AtlassianEmail  string
+
+	// TaskID identifies the logical task this execution belongs to, stable
+	// across NATS redelivery/retries of the same submission. CreatePRSkill
+	// uses it to derive a deterministic branch name so a redelivered task
+	// reuses, rather than duplicates, any branch/PR a prior attempt
+	// already created.
+	TaskID string
 }
 
 // WithCredentials stores credentials in the context.

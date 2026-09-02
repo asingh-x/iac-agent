@@ -684,6 +684,7 @@ func (r *Runner) run(ctx context.Context, item queue.Item, delivery queue.Delive
 		AtlassianToken:  atlassianToken,
 		AtlassianDomain: atlassianDomain,
 		AtlassianEmail:  atlassianEmail,
+		TaskID:          item.TaskID,
 	}
 	taskCtx := taskctx.WithCredentials(ctx, creds)
 
