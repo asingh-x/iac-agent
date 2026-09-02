@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -66,6 +67,7 @@ type Hub struct {
 	// SetStatusCheck).
 	statusCheck func(taskID string) *ServerEvent
 	eventStore  EventStore
+	logger      *slog.Logger
 }
 
 func NewHub() *Hub {
@@ -102,6 +104,14 @@ func (h *Hub) SetStatusCheck(check func(taskID string) *ServerEvent) {
 // published while it was away, the existing behavior.
 func (h *Hub) SetEventStore(store EventStore) {
 	h.eventStore = store
+}
+
+// SetLogger installs a logger for best-effort persistence failures (see
+// Publish). Call once at startup, same as SetRelay/SetStatusCheck. Unset
+// means persistence failures are silently swallowed — acceptable for tests,
+// not for production wiring.
+func (h *Hub) SetLogger(logger *slog.Logger) {
+	h.logger = logger
 }
 
 // Create registers a new buffered channel for taskID.
@@ -144,6 +154,8 @@ func (h *Hub) Publish(taskID string, ev ServerEvent) {
 		// (possibly-cancelled) task context.
 		if seq, err := h.eventStore.AppendRunEvent(context.Background(), taskID, ev); err == nil {
 			ev.Seq = seq
+		} else if h.logger != nil {
+			h.logger.Error("failed to persist run event", "task_id", taskID, "event_type", ev.Type, "err", err)
 		}
 	}
 
