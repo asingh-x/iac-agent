@@ -8,6 +8,7 @@ import (
 	"context"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -288,5 +289,75 @@ func TestServeSSE_NoRelayConfigured_UsesLocalChannelImmediately(t *testing.T) {
 	}
 	if elapsed > time.Second {
 		t.Errorf("took %v, want immediate use of the local channel", elapsed)
+	}
+}
+
+// fakeEventStore is a minimal in-memory EventStore test double for exercising
+// Last-Event-ID replay without a real Postgres-backed store.
+type fakeEventStore struct {
+	mu     sync.Mutex
+	events map[string][]ServerEvent
+	seq    int64
+}
+
+func newFakeEventStore() *fakeEventStore {
+	return &fakeEventStore{events: make(map[string][]ServerEvent)}
+}
+
+func (f *fakeEventStore) AppendRunEvent(_ context.Context, taskID string, ev ServerEvent) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.seq++
+	ev.Seq = f.seq
+	f.events[taskID] = append(f.events[taskID], ev)
+	return f.seq, nil
+}
+
+func (f *fakeEventStore) GetRunEventsSince(_ context.Context, taskID string, sinceSeq int64) ([]ServerEvent, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []ServerEvent
+	for _, ev := range f.events[taskID] {
+		if ev.Seq > sinceSeq {
+			out = append(out, ev)
+		}
+	}
+	return out, nil
+}
+
+func TestHub_ServeSSE_LastEventID_ReplaysMissedEvents(t *testing.T) {
+	hub := NewHub()
+	store := newFakeEventStore()
+	hub.SetEventStore(store)
+
+	taskID := "task-replay"
+	hub.Claim(taskID)
+	hub.Publish(taskID, ServerEvent{Type: "text", Text: "first"})
+	hub.Publish(taskID, ServerEvent{Type: "text", Text: "second"})
+
+	// Simulate a client that already saw "first" (Last-Event-ID: 1) and
+	// reconnects expecting to receive "second" first, then live events.
+	req := httptest.NewRequest("GET", "/v1/tasks/"+taskID+"/stream", nil)
+	req.Header.Set("Last-Event-ID", "1")
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		hub.ServeSSE(rec, req, taskID, nil)
+		close(done)
+	}()
+
+	// Give ServeSSE a moment to write the replayed backlog, then publish one
+	// more live event and close the channel to end the stream.
+	time.Sleep(50 * time.Millisecond)
+	hub.Publish(taskID, ServerEvent{Type: "done"})
+	<-done
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "id: 2") || !strings.Contains(body, `"text":"second"`) {
+		t.Errorf("expected replayed event 'second' (seq 2) in output, got: %q", body)
+	}
+	if strings.Contains(body, `"text":"first"`) {
+		t.Errorf("must not replay 'first' (seq 1) — client already saw it, got: %q", body)
 	}
 }

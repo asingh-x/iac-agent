@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -222,6 +223,28 @@ func (h *Hub) ServeSSE(w http.ResponseWriter, r *http.Request, taskID string, in
 		}
 	}
 
+	// lastEventID is the sequence number, if any, the client says it already
+	// has (from Last-Event-ID). It gates two things below: which backlog gets
+	// replayed from the durable store, and which already-seen events get
+	// filtered back out of the local channel/relay once live reading resumes
+	// (see the filter in the main loop) — a reconnect can land on the same
+	// buffered local channel the previous connection never fully drained
+	// (e.g. it dropped between reading two buffered Publishes), so without
+	// that filter the replay and the leftover buffer would both redeliver the
+	// same events. Zero means "no header" and disables both.
+	var lastEventID int64
+	if lastIDStr := r.Header.Get("Last-Event-ID"); lastIDStr != "" && h.eventStore != nil {
+		if lastID, err := strconv.ParseInt(lastIDStr, 10, 64); err == nil {
+			lastEventID = lastID
+			missed, err := h.eventStore.GetRunEventsSince(r.Context(), taskID, lastID)
+			if err == nil {
+				for _, ev := range missed {
+					writeSSEEvent(w, flusher, ev)
+				}
+			}
+		}
+	}
+
 	// Subscribe to the cross-pod relay first, before waiting to find out
 	// whether this pod owns the task. NATS core pub/sub has no replay, so
 	// anything the owning pod publishes while we are still deciding would be
@@ -281,6 +304,14 @@ func (h *Hub) ServeSSE(w http.ResponseWriter, r *http.Request, taskID string, in
 			if !open {
 				writeSSEEvent(w, flusher, ServerEvent{Type: "error", Error: "task not found or already completed"})
 				return
+			}
+			// Skip anything the replay above already covered (or the client
+			// already had). This is what makes replay safe to combine with a
+			// local channel that was never drained by a prior connection: the
+			// same already-seen events can otherwise still be sitting in its
+			// buffer.
+			if ev.Seq != 0 && ev.Seq <= lastEventID {
+				continue
 			}
 			writeSSEEvent(w, flusher, ev)
 			if ev.Type == "done" || ev.Type == "error" {
@@ -348,6 +379,9 @@ func (h *Hub) awaitLocalChannel(ctx context.Context, taskID string, relayCh <-ch
 
 func writeSSEEvent(w http.ResponseWriter, f http.Flusher, ev ServerEvent) {
 	data, _ := json.Marshal(ev)
+	if ev.Seq != 0 {
+		fmt.Fprintf(w, "id: %d\n", ev.Seq)
+	}
 	fmt.Fprintf(w, "data: %s\n\n", data)
 	f.Flush()
 }
