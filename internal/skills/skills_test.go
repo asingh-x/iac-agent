@@ -1045,3 +1045,41 @@ func TestSecurityScanSkill_RealDocker_ParsesRealCheckovOutput(t *testing.T) {
 		t.Errorf("expected at least one failed check for the deliberately misconfigured fixture, got: %q", out)
 	}
 }
+
+// --- DriftDetectSkill ---
+
+func TestDriftDetect_Metadata(t *testing.T) {
+	s := &DriftDetectSkill{}
+	if got := s.Name(); got != "detect_drift" {
+		t.Errorf("Name() = %q, want %q", got, "detect_drift")
+	}
+	if !s.IsReadOnly() {
+		t.Error("IsReadOnly() = false, want true")
+	}
+	if s.IsDestructive(nil) {
+		t.Error("IsDestructive() = true, want false")
+	}
+}
+
+func TestDriftDetect_Execute_InvalidInput(t *testing.T) {
+	s := &DriftDetectSkill{}
+	_, err := s.Execute(context.Background(), json.RawMessage(`{not valid json`))
+	if err == nil {
+		t.Fatal("expected error for invalid JSON input")
+	}
+	if !strings.Contains(err.Error(), "invalid input") {
+		t.Errorf("expected 'invalid input' in error, got: %v", err)
+	}
+}
+
+func TestDriftDetect_Execute_MissingPath(t *testing.T) {
+	s := &DriftDetectSkill{}
+	input, _ := json.Marshal(map[string]any{})
+	_, err := s.Execute(context.Background(), input)
+	if err == nil {
+		t.Fatal("expected error for missing path")
+	}
+	if !strings.Contains(err.Error(), "path is required") {
+		t.Errorf("expected 'path is required' in error, got: %v", err)
+	}
+}
