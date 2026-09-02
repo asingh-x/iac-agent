@@ -9,9 +9,14 @@ import (
 // resetKey clears the package-level encryption key for test isolation.
 func resetKey(t *testing.T) {
 	t.Helper()
-	prev := encryptionKey
-	t.Cleanup(func() { encryptionKey = prev })
-	encryptionKey = nil
+	prevCurrent := current
+	prevOldKeys := oldKeys
+	t.Cleanup(func() {
+		current = prevCurrent
+		oldKeys = prevOldKeys
+	})
+	current = keyEntry{}
+	oldKeys = map[string]keyEntry{}
 }
 
 func TestEncryptionKeyLoaded_FalseWhenNil(t *testing.T) {
@@ -83,7 +88,7 @@ func setTestKey(t *testing.T) {
 	for i := range key {
 		key[i] = byte(i + 1)
 	}
-	encryptionKey = key
+	current = keyEntry{id: "v1", key: key}
 }
 
 func TestEncryptDecryptRoundtrip(t *testing.T) {
@@ -179,7 +184,7 @@ func TestDecrypt_WrongKey(t *testing.T) {
 	for i := range newKey {
 		newKey[i] = byte(255 - i)
 	}
-	encryptionKey = newKey
+	current = keyEntry{id: "v1", key: newKey}
 
 	_, err = Decrypt(ciphertext)
 	if err == nil {
@@ -202,5 +207,48 @@ func TestDecrypt_NoKeyLoaded(t *testing.T) {
 	_, err := Decrypt("c29tZXRoaW5n") // valid base64, but no key
 	if err == nil {
 		t.Error("expected error from Decrypt when key is not loaded")
+	}
+}
+
+func TestLoadEncryptionKey_DefaultKeyID_NoPrefix(t *testing.T) {
+	resetKey(t)
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	if err := LoadEncryptionKey(); err != nil {
+		t.Fatalf("LoadEncryptionKey: %v", err)
+	}
+	if currentKeyID() != "v1" {
+		t.Errorf("currentKeyID() = %q, want %q (unprefixed env var defaults to v1)", currentKeyID(), "v1")
+	}
+}
+
+func TestLoadEncryptionKey_ExplicitKeyID(t *testing.T) {
+	resetKey(t)
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "v2:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	if err := LoadEncryptionKey(); err != nil {
+		t.Fatalf("LoadEncryptionKey: %v", err)
+	}
+	if currentKeyID() != "v2" {
+		t.Errorf("currentKeyID() = %q, want %q", currentKeyID(), "v2")
+	}
+}
+
+func TestLoadEncryptionKey_OldKeys(t *testing.T) {
+	resetKey(t)
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "v2:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	t.Setenv("TF_AGENT_ENCRYPTION_KEYS_OLD", "v1:202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f")
+	if err := LoadEncryptionKey(); err != nil {
+		t.Fatalf("LoadEncryptionKey: %v", err)
+	}
+	if !hasOldKey("v1") {
+		t.Error("expected old key v1 to be loaded")
+	}
+}
+
+func TestLoadEncryptionKey_MalformedOldKeyEntry_Errors(t *testing.T) {
+	resetKey(t)
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "v2:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	t.Setenv("TF_AGENT_ENCRYPTION_KEYS_OLD", "not-a-valid-entry")
+	if err := LoadEncryptionKey(); err == nil {
+		t.Error("expected an error for a malformed TF_AGENT_ENCRYPTION_KEYS_OLD entry, got nil")
 	}
 }
