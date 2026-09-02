@@ -1083,3 +1083,50 @@ func TestDriftDetect_Execute_MissingPath(t *testing.T) {
 		t.Errorf("expected 'path is required' in error, got: %v", err)
 	}
 }
+
+// requireTerraform skips the test if the terraform binary isn't on PATH.
+// DriftDetectSkill never calls tflint, so it doesn't need
+// requireTerraformAndTflint's stricter two-binary gate.
+func requireTerraform(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("terraform"); err != nil {
+		t.Skip("terraform not installed — skipping real-tool integration test")
+	}
+}
+
+// TestDriftDetect_Execute_NoDrift_RealTerraform proves the "No drift
+// detected" happy path against a real terraform binary. It uses the
+// built-in terraform_data resource (no provider download, no network —
+// same zero-network-dependency convention as
+// TestValidateSkill_Execute_RealTools_StructuredOutput above) and a real
+// `apply` so the state file genuinely matches the config.
+func TestDriftDetect_Execute_NoDrift_RealTerraform(t *testing.T) {
+	requireTerraform(t)
+
+	dir := t.TempDir()
+	tf := "resource \"terraform_data\" \"example\" {\n  input = \"hello\"\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "main.tf"), []byte(tf), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	initCmd := exec.Command("terraform", "init", "-input=false", "-no-color")
+	initCmd.Dir = dir
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("terraform init: %v\n%s", err, out)
+	}
+	applyCmd := exec.Command("terraform", "apply", "-auto-approve", "-input=false", "-no-color")
+	applyCmd.Dir = dir
+	if out, err := applyCmd.CombinedOutput(); err != nil {
+		t.Fatalf("terraform apply: %v\n%s", err, out)
+	}
+
+	s := &DriftDetectSkill{}
+	input, _ := json.Marshal(map[string]any{"path": dir})
+	out, err := s.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(out, "No drift detected") {
+		t.Errorf("expected 'No drift detected', got: %q", out)
+	}
+}
