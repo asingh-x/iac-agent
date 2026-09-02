@@ -60,28 +60,41 @@ sandboxing + real auth".
   a cert you explicitly supply; it never disables verification.
 
 - **Config** (`internal/config/settings.go`, `ServerConfig`):
-  `sandbox_enabled` (bool, **default `false`**), `sandbox_image` (default
-  `iac-agent-sandbox:latest`), `sandbox_memory` (default `512m`),
-  `sandbox_cpus` (default `1`). Env overrides: `TF_AGENT_SANDBOX_ENABLED`,
-  `TF_AGENT_SANDBOX_IMAGE`. See `config.sample.toml`.
+  `sandbox_image` (default `ghcr.io/asingh-x/iac-agent/sandbox:latest`),
+  `sandbox_memory` (default `512m`), `sandbox_cpus` (default `1`). Env
+  overrides: `TF_AGENT_SANDBOX_IMAGE`. See `config.sample.toml`. The
+  sandbox is now mandatory — `terraform`, `tflint`, and `checkov` always
+  execute inside it; direct host execution is no longer an option.
 
-  `sandbox_enabled` defaults to `false` so `make run`/local dev keeps
-  working unchanged for anyone without Docker running — the sandbox is
-  opt-in, not a surprise new dependency.
-
-- **Wiring** (`internal/server/task_runner.go: wireAgent`): when
-  `sandbox_enabled = true`, a `sandbox.DockerExecutor` is built from
-  config and passed to `skills.NewValidateSkill(executor)` and
-  `skills.NewSecurityScanSkill(executor)`. When `false` (default),
-  `executor` is `nil` and both skills fall back to their original
-  direct-host `exec.CommandContext` path — byte-for-byte the same code path
-  that ran before `internal/sandbox` existed.
+- **Wiring** (`internal/server/task_runner.go: wireAgent`): a
+  `sandbox.DockerExecutor` is always built from config and passed to
+  `skills.NewValidateSkill(executor)` and
+  `skills.NewSecurityScanSkill(executor)`. Both skills use the sandbox
+  executor unconditionally; direct host `exec.CommandContext` is no longer
+  available.
 
 - **`make doctor`** prints whether the sandbox image has been built
   (`docker image inspect <sandbox_image>`) and points at
   `make sandbox-build` if not.
 
 ## Enabling it
+
+The sandbox is now mandatory — there is no opt-out toggle. To use `Validate`
+and `SecurityScan`, you must have a reachable sandbox image.
+
+**Option A: use the published image** (default, no local build needed)
+
+The sandbox image is published to `ghcr.io/asingh-x/iac-agent/sandbox:latest`
+(multi-arch: `linux/amd64` + `linux/arm64`). This is the default
+`sandbox_image` setting and works immediately for both Docker and Kubernetes
+backends:
+
+```bash
+# No build required; just run the server.
+make build && make run
+```
+
+**Option B: build your own image locally**
 
 ```bash
 make sandbox-build                 # builds iac-agent-sandbox:latest
@@ -90,13 +103,14 @@ make sandbox-build                 # builds iac-agent-sandbox:latest
 ```toml
 # ~/.tf-agent/config.toml
 [server]
-sandbox_enabled = true
-# sandbox_image  = "iac-agent-sandbox:latest"  # default
-# sandbox_memory = "512m"                     # default
-# sandbox_cpus   = "1"                        # default
+# sandbox_image = "iac-agent-sandbox:latest"  # your local build
+# sandbox_backend = "docker"                 # default
+# sandbox_memory = "512m"                    # default
+# sandbox_cpus   = "1"                       # default
 ```
 
-or `TF_AGENT_SANDBOX_ENABLED=true` in the environment.
+The sandbox backend is `docker` by default; see the Kubernetes Job executor
+section below for `sandbox_backend = "kubernetes"`.
 
 ## Verified for real (2026-08-22)
 
@@ -188,12 +202,12 @@ cluster).
   `TF_AGENT_SANDBOX_BACKEND`, `TF_AGENT_SANDBOX_KUBE_NAMESPACE`,
   `TF_AGENT_SANDBOX_KUBECONFIG_PATH`.
 - **Wiring** (`internal/server/task_runner.go: wireAgent`): when
-  `sandbox_enabled = true` and `sandbox_backend = "kubernetes"`, a
-  `sandbox.K8sJobExecutor` is built instead of `DockerExecutor` and passed
-  to the same `ValidateSkill`/`SecurityScanSkill` constructors — neither
-  skill knows or cares which backend it's talking to. A failure to build
-  the Kubernetes client (bad/unreachable kubeconfig) fails task setup
-  immediately and loudly, rather than silently falling back to host-exec.
+  `sandbox_backend = "kubernetes"`, a `sandbox.K8sJobExecutor` is built
+  instead of `DockerExecutor` and passed to the same `ValidateSkill`/
+  `SecurityScanSkill` constructors — neither skill knows or cares which
+  backend it's talking to. A failure to build the Kubernetes client
+  (bad/unreachable kubeconfig) fails task setup immediately and loudly,
+  rather than falling back to anything else.
 
 ### File staging: exec/tar, not PVC/object-storage
 

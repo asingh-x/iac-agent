@@ -33,17 +33,18 @@ terminal status, and `/v1/tasks/{id}/output` pagination.
 task error-rate window; prompt cache hit/miss and per-tool execution metrics
 added at `/metrics`; benchmarks for the cross-pod relay and repo-index cache.
 
-**Terraform execution sandbox**: `terraform`/`tflint`/`checkov` can now run
-inside a locked-down Docker container (`--network=none`, dropped
-capabilities, non-root, resource limits) instead of directly on the host —
-opt-in via `sandbox_enabled`, off by default. A Kubernetes `Job`-based
-executor for multi-node deployments is also built and verified for real
-against a live cluster (Job/pod lifecycle, file staging, guaranteed cleanup,
-a `NetworkPolicy` confirmed actually enforced) — see `docs/sandbox.md`. The
-sandbox image itself is now published, multi-arch (amd64+arm64), to
-`ghcr.io/asingh-x/iac-agent/sandbox:latest` — the new default for
+**Terraform execution sandbox**: `terraform`/`tflint`/`checkov` now always
+run inside a locked-down Docker container (`--network=none`, dropped
+capabilities, non-root, resource limits) or Kubernetes `Job` (configurable
+via `sandbox_backend`) instead of directly on the host. A Kubernetes
+`Job`-based executor for multi-node deployments is verified for real against
+a live cluster (Job/pod lifecycle, file staging, guaranteed cleanup, a
+`NetworkPolicy` confirmed actually enforced) — see `docs/sandbox.md`. The
+sandbox image itself is published, multi-arch (amd64+arm64), to
+`ghcr.io/asingh-x/iac-agent/sandbox:latest` — the default for
 `sandbox_image`, so both backends work out of the box with no local build
-required (renamed from a leftover `tf-agent-sandbox` name along the way).
+required. The `sandbox_enabled` toggle is removed; sandboxing is now
+mandatory (renamed from a leftover `tf-agent-sandbox` name along the way).
 
 **Agent loop**: `ValidateSkill` now parses `terraform validate -json` /
 `tflint --format=json` into structured, actionable diagnostics instead of
