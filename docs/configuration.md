@@ -48,6 +48,26 @@ Environment variables always override values in `config.toml`.
 
 Per-user GitHub and Atlassian tokens can be saved via the Settings page. They are stored AES-256-GCM encrypted at rest.
 
+## Rotating the encryption key
+
+`TF_AGENT_ENCRYPTION_KEY` accepts an optional `<keyID>:` prefix (e.g.
+`v2:0102...`) — a bare 64-hex-char value with no prefix defaults to `v1`,
+so existing deployments need no change. To rotate:
+
+1. Move the current key into `TF_AGENT_ENCRYPTION_KEYS_OLD` (comma-separated
+   `<keyID>:<hex>` pairs, decrypt-only) under its existing ID.
+2. Set `TF_AGENT_ENCRYPTION_KEY` to a new value with a new `<keyID>:` prefix.
+3. Restart. Already-stored tokens keep decrypting via the old-keys list;
+   anything saved or updated after the restart is encrypted with the new
+   current key.
+4. Once you're confident every live token has been re-saved (e.g. after
+   asking users to re-enter GitHub/Atlassian tokens via Settings), drop the
+   old key from `TF_AGENT_ENCRYPTION_KEYS_OLD`.
+
+There's no bulk re-encryption job — rotation is gradual, keyed by whichever
+tokens users happen to re-save. If you need forced re-encryption of every
+row on a timeline, that's a separate follow-up (not part of this feature).
+
 ## Infrastructure setup
 
 iac-agent ships with one-command Docker infra bootstrap — no docker-compose needed.
