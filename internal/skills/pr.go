@@ -102,6 +102,12 @@ func (s *CreatePRSkill) Execute(ctx context.Context, input json.RawMessage) (str
 		return "", fmt.Errorf("CreatePR: %w", err)
 	}
 
+	// Derive deterministic branch name from TaskID if available.
+	branch := args.Branch
+	if creds, ok := taskctx.FromContext(ctx); ok && creds.TaskID != "" {
+		branch = "iac-agent/task-" + creds.TaskID
+	}
+
 	client := &http.Client{Timeout: 30 * time.Second}
 	gh := &githubClient{client: client, token: token, owner: owner, repo: repo, baseURL: s.apiBase()}
 
@@ -112,19 +118,19 @@ func (s *CreatePRSkill) Execute(ctx context.Context, input json.RawMessage) (str
 	}
 
 	// Step b: create branch.
-	if err := gh.createRef(ctx, "refs/heads/"+args.Branch, baseSHA); err != nil {
+	if err := gh.createRef(ctx, "refs/heads/"+branch, baseSHA); err != nil {
 		return "", fmt.Errorf("CreatePR: create branch: %w", err)
 	}
 
 	// Step c: create/update each file.
 	for path, content := range args.Files {
-		if err := gh.createOrUpdateFile(ctx, path, content, args.Branch); err != nil {
+		if err := gh.createOrUpdateFile(ctx, path, content, branch); err != nil {
 			return "", fmt.Errorf("CreatePR: upload file %s: %w", path, err)
 		}
 	}
 
 	// Step d: open PR.
-	prURL, err := gh.createPR(ctx, args.Title, args.Body, args.Branch, "main")
+	prURL, err := gh.createPR(ctx, args.Title, args.Body, branch, "main")
 	if err != nil {
 		return "", fmt.Errorf("CreatePR: create PR: %w", err)
 	}

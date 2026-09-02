@@ -3,6 +3,8 @@ package skills
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/tf-agent/tf-agent/internal/sandbox"
+	"github.com/tf-agent/tf-agent/internal/taskctx"
 )
 
 // --- Registry ---
@@ -469,6 +472,58 @@ func TestCreatePR_MissingToken(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "github_token") {
 		t.Errorf("error should mention github_token: %v", err)
+	}
+}
+
+func TestCreatePR_DeterministicBranch_UsesTaskID(t *testing.T) {
+	var capturedRef string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/git/ref/heads/main"):
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]any{"object": map[string]string{"sha": "base-sha"}})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/git/ref/heads/"):
+			w.WriteHeader(http.StatusNotFound) // branch doesn't exist yet
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git/refs"):
+			var body map[string]string
+			json.NewDecoder(r.Body).Decode(&body)
+			capturedRef = body["ref"]
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/contents/"):
+			w.WriteHeader(http.StatusNotFound) // file doesn't exist yet
+		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/"):
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/pulls"):
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode([]any{}) // no existing PR
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"html_url": "https://github.com/org/repo/pull/1"})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	s := &CreatePRSkill{baseURL: srv.URL}
+	ctx := taskctx.WithCredentials(context.Background(), taskctx.Credentials{
+		GitHubToken: "tok",
+		TaskID:      "task-abc-123",
+	})
+	input, _ := json.Marshal(map[string]any{
+		"repo_url": "github.com/org/repo",
+		"branch":   "whatever-the-llm-suggested",
+		"title":    "test PR",
+		"body":     "test",
+		"files":    map[string]string{"main.tf": "content"},
+	})
+	_, err := s.Execute(ctx, input)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if capturedRef != "refs/heads/iac-agent/task-task-abc-123" {
+		t.Errorf("branch ref = %q, want deterministic task-based ref, not the LLM-suggested name", capturedRef)
 	}
 }
 
