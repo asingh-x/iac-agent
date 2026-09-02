@@ -126,8 +126,9 @@ func LoadEncryptionKey() error {
 // EncryptionKeyLoaded reports whether the AES encryption key has been loaded.
 func EncryptionKeyLoaded() bool { return current.key != nil }
 
-// Encrypt encrypts plaintext with AES-256-GCM and returns a base64-encoded ciphertext.
-// Returns empty string unchanged.
+// Encrypt encrypts plaintext with AES-256-GCM using the current key and
+// returns a "<keyID>:<base64 nonce||ciphertext>" string. Returns empty
+// string unchanged.
 func Encrypt(plaintext string) (string, error) {
 	if plaintext == "" {
 		return "", nil
@@ -148,10 +149,14 @@ func Encrypt(plaintext string) (string, error) {
 		return "", err
 	}
 	sealed := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
-	return base64.StdEncoding.EncodeToString(sealed), nil
+	return current.id + ":" + base64.StdEncoding.EncodeToString(sealed), nil
 }
 
-// Decrypt decrypts a base64-encoded AES-256-GCM ciphertext.
+// Decrypt decrypts a ciphertext produced by Encrypt. It accepts both the
+// current "<keyID>:<base64>" format (using the current key or, after a
+// rotation, any key listed in TF_AGENT_ENCRYPTION_KEYS_OLD) and the legacy
+// pre-versioning format — plain base64 with no keyID prefix, which is
+// decrypted with the current key exactly as before this feature existed.
 // Returns empty string unchanged.
 func Decrypt(ciphertext string) (string, error) {
 	if ciphertext == "" {
@@ -160,11 +165,31 @@ func Decrypt(ciphertext string) (string, error) {
 	if current.key == nil {
 		return "", fmt.Errorf("encryption key not loaded")
 	}
-	data, err := base64.StdEncoding.DecodeString(ciphertext)
+
+	key := current.key
+	blob := ciphertext
+	// New format carries "<keyID>:" before the base64 blob. Standard base64
+	// never contains ':', so a legacy (pre-versioning) ciphertext — plain
+	// base64, no prefix — is unambiguous: it has no colon at all, and falls
+	// through to decrypting with the current key, exactly like before this
+	// feature existed.
+	if idx := strings.Index(ciphertext, ":"); idx >= 0 {
+		id := ciphertext[:idx]
+		if id == current.id {
+			key = current.key
+		} else if entry, ok := oldKeys[id]; ok {
+			key = entry.key
+		} else {
+			return "", fmt.Errorf("decrypt: unknown encryption key id %q", id)
+		}
+		blob = ciphertext[idx+1:]
+	}
+
+	data, err := base64.StdEncoding.DecodeString(blob)
 	if err != nil {
 		return "", fmt.Errorf("base64 decode: %w", err)
 	}
-	block, err := aes.NewCipher(current.key)
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return "", err
 	}
@@ -175,10 +200,10 @@ func Decrypt(ciphertext string) (string, error) {
 	if len(data) < gcm.NonceSize() {
 		return "", fmt.Errorf("ciphertext too short")
 	}
-	nonce, ciphered := data[:gcm.NonceSize()], data[gcm.NonceSize():]
-	plain, err := gcm.Open(nil, nonce, ciphered, nil)
+	nonce, sealed := data[:gcm.NonceSize()], data[gcm.NonceSize():]
+	plaintext, err := gcm.Open(nil, nonce, sealed, nil)
 	if err != nil {
 		return "", fmt.Errorf("decrypt: %w", err)
 	}
-	return string(plain), nil
+	return string(plaintext), nil
 }
