@@ -4,7 +4,9 @@ package queue
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 )
@@ -78,5 +80,80 @@ func TestPostgresQueue_Pop_ClaimsExactlyOnceAcrossTwoPollers(t *testing.T) {
 	_, _, err = qB.Pop(ctx2)
 	if err == nil {
 		t.Fatal("expected qB.Pop to time out (item already leased by qA), got a result instead")
+	}
+}
+
+// TestPostgresQueue_Pop_NoDoubleClaimUnderConcurrentPollers exercises the
+// actual FOR UPDATE SKIP LOCKED contention path directly: unlike
+// TestPostgresQueue_Pop_ClaimsExactlyOnceAcrossTwoPollers (where qA's claim
+// fully commits before qB ever polls), here every worker is released through
+// a shared start barrier so they genuinely race to claim the same batch of
+// still-'queued' rows at the same instant. This is the property the whole
+// task exists to guarantee: two concurrent pollers must never claim the same
+// row.
+func TestPostgresQueue_Pop_NoDoubleClaimUnderConcurrentPollers(t *testing.T) {
+	url := requireDBURL(t)
+	const queueName = "pgqtest-pop-concurrent"
+	const nItems = 8
+	const nWorkers = 20
+
+	setup, err := NewPostgresQueue(url, queueName, 5*time.Minute, 5)
+	if err != nil {
+		t.Fatalf("NewPostgresQueue setup: %v", err)
+	}
+	defer setup.Close()
+
+	// Clean up any previous test data so this test is re-runnable.
+	_, _ = setup.db.ExecContext(context.Background(), `DELETE FROM task_queue WHERE queue_name = $1`, queueName)
+
+	for i := 0; i < nItems; i++ {
+		if err := setup.Push(context.Background(), Item{TaskID: fmt.Sprintf("pop-race-%d", i)}); err != nil {
+			t.Fatalf("Push %d: %v", i, err)
+		}
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	claimCount := map[string]int{} // TaskID -> number of times any worker claimed it
+
+	for w := 0; w < nWorkers; w++ {
+		q, err := NewPostgresQueue(url, queueName, 5*time.Minute, 5)
+		if err != nil {
+			t.Fatalf("NewPostgresQueue worker %d: %v", w, err)
+		}
+		defer q.Close()
+
+		wg.Add(1)
+		go func(q *PostgresQueue) {
+			defer wg.Done()
+			<-start // block until every worker is released together
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			item, _, err := q.Pop(ctx)
+			if err != nil {
+				return // no eligible row left for this worker — expected once nItems are claimed
+			}
+			mu.Lock()
+			claimCount[item.TaskID]++
+			mu.Unlock()
+		}(q)
+	}
+
+	close(start) // release all goroutines at once so they race for the same rows
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	total := 0
+	for id, count := range claimCount {
+		total += count
+		if count != 1 {
+			t.Fatalf("task %q claimed %d times, want exactly 1 — DOUBLE CLAIM DETECTED", id, count)
+		}
+	}
+	if len(claimCount) != nItems || total != nItems {
+		t.Fatalf("claimed %d distinct items (%d total claims), want %d items claimed exactly once each; claimCount=%v", len(claimCount), total, nItems, claimCount)
 	}
 }
