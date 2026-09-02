@@ -4,6 +4,7 @@ package queue
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"sync"
@@ -281,6 +282,144 @@ func TestPostgresDelivery_Ack_StaleFencingToken_NoOp(t *testing.T) {
 		t.Fatalf("fresh Ack: %v", err)
 	}
 	if err := q.db.QueryRow(`SELECT status FROM task_queue WHERE id = $1`, "fence-1").Scan(&status); err != nil {
+		t.Fatalf("query status: %v", err)
+	}
+	if status != "done" {
+		t.Errorf("status = %q, want %q after the genuine holder's Ack", status, "done")
+	}
+}
+
+func TestPostgresDelivery_Nak_RetriesWithBackoff(t *testing.T) {
+	url := requireDBURL(t)
+	q, err := NewPostgresQueue(url, "pgqtest-nak", 5*time.Minute, 5)
+	if err != nil {
+		t.Fatalf("NewPostgresQueue: %v", err)
+	}
+	defer q.Close()
+
+	// Clean up any previous test data so this test is re-runnable.
+	_, _ = q.db.ExecContext(context.Background(), `DELETE FROM task_queue WHERE queue_name = $1`, "pgqtest-nak")
+
+	if err := q.Push(context.Background(), Item{TaskID: "nak-1"}); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, delivery, err := q.Pop(ctx)
+	if err != nil {
+		t.Fatalf("Pop: %v", err)
+	}
+	if err := delivery.Nak(); err != nil {
+		t.Fatalf("Nak: %v", err)
+	}
+
+	var status string
+	var nextAttempt time.Time
+	if err := q.db.QueryRow(`SELECT status, next_attempt_at FROM task_queue WHERE id = $1`, "nak-1").Scan(&status, &nextAttempt); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if status != "queued" {
+		t.Errorf("status = %q, want %q (first Nak should retry, not dead-letter)", status, "queued")
+	}
+	if !nextAttempt.After(time.Now()) {
+		t.Error("next_attempt_at should be pushed into the future by backoff, not immediate")
+	}
+}
+
+func TestPostgresDelivery_Nak_DeadLettersAfterMaxAttempts(t *testing.T) {
+	url := requireDBURL(t)
+	q, err := NewPostgresQueue(url, "pgqtest-deadletter", 1*time.Second, 2) // maxAttempts=2, short TTL for a fast test
+	if err != nil {
+		t.Fatalf("NewPostgresQueue: %v", err)
+	}
+	defer q.Close()
+
+	// Clean up any previous test data so this test is re-runnable.
+	_, _ = q.db.ExecContext(context.Background(), `DELETE FROM task_queue WHERE queue_name = $1`, "pgqtest-deadletter")
+
+	if err := q.Push(context.Background(), Item{TaskID: "dl-1"}); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		_, delivery, err := q.Pop(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("Pop attempt %d: %v", i+1, err)
+		}
+		if err := delivery.Nak(); err != nil {
+			t.Fatalf("Nak attempt %d: %v", i+1, err)
+		}
+	}
+
+	var status string
+	var reason sql.NullString
+	if err := q.db.QueryRow(`SELECT status, dead_letter_reason FROM task_queue WHERE id = $1`, "dl-1").Scan(&status, &reason); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if status != "dead_letter" {
+		t.Fatalf("status = %q, want %q after exceeding max_attempts", status, "dead_letter")
+	}
+	if !reason.Valid || reason.String == "" {
+		t.Error("expected a non-empty dead_letter_reason")
+	}
+}
+
+func TestPostgresDelivery_Nak_StaleFencingToken_NoOp(t *testing.T) {
+	// Simulates a zombie worker: its lease expired, another poller reclaimed
+	// the row (bumping lease_token), and the zombie's Nak (with the OLD
+	// token) must affect nothing — it must not push the reclaiming worker's
+	// still-in-progress row back to 'queued' (or dead-letter it) out from
+	// under it.
+	url := requireDBURL(t)
+	q, err := NewPostgresQueue(url, "pgqtest-nak-fencing", 1*time.Second, 5) // very short TTL
+	if err != nil {
+		t.Fatalf("NewPostgresQueue: %v", err)
+	}
+	defer q.Close()
+
+	// Clean up any previous test data so this test is re-runnable.
+	_, _ = q.db.ExecContext(context.Background(), `DELETE FROM task_queue WHERE queue_name = $1`, "pgqtest-nak-fencing")
+
+	if err := q.Push(context.Background(), Item{TaskID: "nak-fence-1"}); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, staleDelivery, err := q.Pop(ctx) // the "zombie" — never extends, never naks in time
+	if err != nil {
+		t.Fatalf("Pop (zombie): %v", err)
+	}
+
+	time.Sleep(1500 * time.Millisecond) // let the 1s lease expire
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel2()
+	_, freshDelivery, err := q.Pop(ctx2) // a different poller reclaims it
+	if err != nil {
+		t.Fatalf("Pop (reclaim): %v", err)
+	}
+
+	// The zombie's Nak, using its now-stale lease_token, must be a no-op.
+	if err := staleDelivery.Nak(); err != nil {
+		t.Fatalf("stale Nak should return nil (no-op), got error: %v", err)
+	}
+
+	var status string
+	if err := q.db.QueryRow(`SELECT status FROM task_queue WHERE id = $1`, "nak-fence-1").Scan(&status); err != nil {
+		t.Fatalf("query status: %v", err)
+	}
+	if status != "leased" {
+		t.Fatalf("status = %q, want %q — the zombie's stale Nak must not have re-queued or dead-lettered this out from under the reclaiming worker", status, "leased")
+	}
+
+	// The genuine holder's Ack must still work, proving the row is still
+	// intact and owned by the reclaiming worker's lease.
+	if err := freshDelivery.Ack(); err != nil {
+		t.Fatalf("fresh Ack: %v", err)
+	}
+	if err := q.db.QueryRow(`SELECT status FROM task_queue WHERE id = $1`, "nak-fence-1").Scan(&status); err != nil {
 		t.Fatalf("query status: %v", err)
 	}
 	if status != "done" {

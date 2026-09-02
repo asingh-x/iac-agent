@@ -67,9 +67,7 @@ func (q *PostgresQueue) Len() int {
 }
 
 // postgresDelivery is the acknowledgment handle for one item claimed via
-// PostgresQueue.Pop. Ack/Nak are implemented in Tasks 4-5; Extend alongside
-// them — stubbed here so postgresDelivery satisfies the Delivery interface
-// and this package compiles.
+// PostgresQueue.Pop.
 type postgresDelivery struct {
 	q          *PostgresQueue
 	taskID     string
@@ -174,6 +172,50 @@ func (d *postgresDelivery) Ack() error {
 	return err
 }
 
-// Nak is implemented in Task 5 — stubbed here so postgresDelivery satisfies
-// the Delivery interface and this package compiles.
-func (d *postgresDelivery) Nak() error { return nil }
+// backoff returns an exponential delay capped at 5 minutes, keyed by
+// attempt number (1-indexed, matching attempt_count after Pop's increment).
+func backoff(attempt int) time.Duration {
+	d := time.Duration(1<<uint(attempt)) * time.Second // 2s, 4s, 8s, 16s, ...
+	const cap = 5 * time.Minute
+	if d > cap {
+		return cap
+	}
+	return d
+}
+
+// Nak signals that processing failed. If this delivery's lease_token is
+// still current and attempt_count hasn't hit max_attempts yet, the item is
+// put back on the queue with an exponential backoff delay before its next
+// attempt. Otherwise it is transitioned to dead_letter — unless the
+// lease_token is stale (a zombie's Nak, whose row now belongs to a
+// different lease holder), in which case both UPDATEs affect zero rows and
+// this is a harmless no-op, matching Ack's fencing behavior.
+func (d *postgresDelivery) Nak() error {
+	// Retry path: only succeeds (affects a row) if this delivery's
+	// lease_token is still current AND attempt_count hasn't hit the cap yet.
+	next := time.Now().Add(backoff(d.attempt))
+	res, err := d.q.db.Exec(`
+		UPDATE task_queue
+		SET status = 'queued', next_attempt_at = $3, updated_at = NOW()
+		WHERE id = $1 AND lease_token = $2 AND attempt_count < max_attempts
+	`, d.taskID, d.leaseToken, next)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+
+	// Either this was the final allowed attempt (dead-letter it), or the
+	// lease_token is stale (a zombie's Nak — no-op, matching Ack's fencing
+	// behavior). Try the dead-letter transition; if that also affects zero
+	// rows, it was the stale-fencing case, which is a harmless no-op.
+	_, err = d.q.db.Exec(`
+		UPDATE task_queue
+		SET status = 'dead_letter',
+		    dead_letter_reason = 'exceeded max_attempts (' || max_attempts || ')',
+		    updated_at = NOW()
+		WHERE id = $1 AND lease_token = $2 AND attempt_count >= max_attempts
+	`, d.taskID, d.leaseToken)
+	return err
+}
