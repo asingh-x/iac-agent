@@ -145,8 +145,35 @@ func (q *PostgresQueue) tryClaim(ctx context.Context) (Item, Delivery, error) {
 	return item, &postgresDelivery{q: q, taskID: id, leaseToken: leaseToken, attempt: attempt}, nil
 }
 
-// Ack/Nak/Extend are implemented in the next two tasks — stub them here so
-// postgresDelivery satisfies the Delivery interface and this compiles.
-func (d *postgresDelivery) Ack() error    { return nil }
-func (d *postgresDelivery) Nak() error    { return nil }
-func (d *postgresDelivery) Extend() error { return nil }
+// Extend pushes this lease's leased_until further into the future, guarded
+// by lease_token: if this delivery's token no longer matches the row's
+// current lease_token (the lease already expired and was reclaimed by
+// another poller), the UPDATE matches zero rows and this is a silent no-op
+// rather than corrupting the reclaiming poller's lease.
+func (d *postgresDelivery) Extend() error {
+	leasedUntil := time.Now().Add(d.q.leaseTTL)
+	_, err := d.q.db.Exec(
+		`UPDATE task_queue SET leased_until = $3, updated_at = NOW() WHERE id = $1 AND lease_token = $2`,
+		d.taskID, d.leaseToken, leasedUntil,
+	)
+	return err
+}
+
+// Ack marks this item done, guarded by lease_token in the same way as
+// Extend.
+//
+// A stale lease_token (this delivery's lease already expired and was
+// reclaimed by another poller) means zero rows match — that's success
+// from this zombie caller's point of view: whoever holds the current
+// lease is responsible for the row now, not an error to surface.
+func (d *postgresDelivery) Ack() error {
+	_, err := d.q.db.Exec(
+		`UPDATE task_queue SET status = 'done', updated_at = NOW() WHERE id = $1 AND lease_token = $2`,
+		d.taskID, d.leaseToken,
+	)
+	return err
+}
+
+// Nak is implemented in Task 5 — stubbed here so postgresDelivery satisfies
+// the Delivery interface and this package compiles.
+func (d *postgresDelivery) Nak() error { return nil }
