@@ -18,6 +18,7 @@ type ServerEvent struct {
 	PRUrl  string `json:"pr_url,omitempty"` // for type=done
 	Status string `json:"status,omitempty"` // for type=status
 	Error  string `json:"error,omitempty"`  // for type=error
+	Seq    int64  `json:"seq,omitempty"`    // persisted sequence number, 0 if not persisted (see EventStore)
 }
 
 // Timing knobs for ServeSSE. Vars rather than consts purely so tests can
@@ -38,6 +39,15 @@ var (
 	relayStatusRecheckInterval = 30 * time.Second
 )
 
+// EventStore persists an ordered event log per task so a reconnecting SSE
+// client can replay anything it missed via Last-Event-ID. Mirrors the
+// EventRelay/ControlRelay decoupling pattern already used in this package —
+// Hub doesn't know about internal/db directly.
+type EventStore interface {
+	AppendRunEvent(ctx context.Context, taskID string, ev ServerEvent) (seq int64, err error)
+	GetRunEventsSince(ctx context.Context, taskID string, sinceSeq int64) ([]ServerEvent, error)
+}
+
 // Hub manages per-task SSE event channels.
 type Hub struct {
 	mu       sync.RWMutex
@@ -55,6 +65,7 @@ type Hub struct {
 	// statusCheck, if set, reads the task's current durable state (see
 	// SetStatusCheck).
 	statusCheck func(taskID string) *ServerEvent
+	eventStore  EventStore
 }
 
 func NewHub() *Hub {
@@ -83,6 +94,14 @@ func (h *Hub) SetRelay(relay EventRelay) {
 // single-process deployment where the local channel is always authoritative.
 func (h *Hub) SetStatusCheck(check func(taskID string) *ServerEvent) {
 	h.statusCheck = check
+}
+
+// SetEventStore installs durable event persistence, enabling Last-Event-ID
+// SSE replay in ServeSSE. Call once at startup, same as SetRelay. Unset
+// means no persistence — a disconnected client permanently loses events
+// published while it was away, the existing behavior.
+func (h *Hub) SetEventStore(store EventStore) {
+	h.eventStore = store
 }
 
 // Create registers a new buffered channel for taskID.
@@ -117,6 +136,17 @@ func (h *Hub) Claim(taskID string) chan ServerEvent {
 // full) and broadcasts it to the cross-pod relay, so a client whose SSE
 // connection landed on a different pod still sees it.
 func (h *Hub) Publish(taskID string, ev ServerEvent) {
+	if h.eventStore != nil {
+		// Best-effort: a persistence failure must never block live delivery.
+		// context.Background() matches this codebase's existing convention
+		// (see Runner.persistFinalResult) of using a fresh context for a
+		// durable write that must complete independent of the caller's own
+		// (possibly-cancelled) task context.
+		if seq, err := h.eventStore.AppendRunEvent(context.Background(), taskID, ev); err == nil {
+			ev.Seq = seq
+		}
+	}
+
 	h.relay.Publish(taskID, ev)
 
 	h.mu.RLock()
