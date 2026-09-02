@@ -171,6 +171,8 @@ func main() {
 	}
 
 	hub := server.NewHub()
+	hub.SetEventStore(server.NewDBEventStore(store))
+	hub.SetLogger(logger)
 	runner := server.NewRunner(hub, store, queues["default"], provider, cfg, logger)
 
 	if relayConn != nil {
