@@ -58,6 +58,16 @@ before creating either, so a redelivered or retried task resumes from
 wherever it left off (including a straight-to-existing-PR-URL return)
 instead of failing or opening a duplicate PR.
 
+**Replayable live state**: SSE events are now persisted to an ordered
+`run_events` table, so a client reconnecting with `Last-Event-ID` replays
+everything it missed instead of losing it. The LLM-concurrency semaphore is
+also now released while a task is paused on a question or permission prompt
+(previously held for up to 7 days) via a `pauseGate` depth-counter that
+safely handles overlapping pauses on the same task. A final review caught
+and fixed a reproduced hang (reconnecting right as a task finishes could
+leave the SSE connection stuck forever), a related per-user semaphore-sweeper
+race, and an unbounded DB write on the event-publish hot path.
+
 See `docs/roadmap.md` for what's still open.
 
 ## [0.1.0] — 2026-04-03
