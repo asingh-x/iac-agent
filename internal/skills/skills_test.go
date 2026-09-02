@@ -1194,3 +1194,32 @@ func TestDriftDetect_Execute_InitFails_SoftError(t *testing.T) {
 		t.Errorf("expected soft init-failure message, got: %q", out)
 	}
 }
+
+// TestValidateSkill_RealDocker_ParsesRealToolOutput proves ValidateSkill's
+// sandboxed path produces the same structured output as its direct-host
+// path (TestValidateSkill_Execute_RealTools_StructuredOutput above), but
+// running terraform/tflint inside the real sandbox container — the
+// real-Docker counterpart SecurityScanSkill already has.
+func TestValidateSkill_RealDocker_ParsesRealToolOutput(t *testing.T) {
+	requireSandboxDocker(t)
+
+	dir := t.TempDir()
+	tf := "resource \"terraform_data\" \"example\" {\n" +
+		"  input = \"hello\"\n" +
+		"  foo   = \"bar\"\n" +
+		"}\n"
+	if err := os.WriteFile(filepath.Join(dir, "main.tf"), []byte(tf), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	executor := sandbox.NewDockerExecutor(sandboxTestImage, "", "")
+	s := NewValidateSkill(executor)
+	input, _ := json.Marshal(map[string]any{"path": dir})
+	out, err := s.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(out, "Unsupported argument") {
+		t.Errorf("expected real terraform validate diagnostic through the sandbox, got: %q", out)
+	}
+}
