@@ -1059,6 +1059,9 @@ func TestDriftDetect_Metadata(t *testing.T) {
 	if s.IsDestructive(nil) {
 		t.Error("IsDestructive() = true, want false")
 	}
+	if s.Prompt() == "" {
+		t.Error("Prompt should be non-empty")
+	}
 }
 
 func TestDriftDetect_Execute_InvalidInput(t *testing.T) {
@@ -1195,6 +1198,49 @@ func TestDriftDetect_Execute_InitFails_SoftError(t *testing.T) {
 	}
 }
 
+// TestDriftDetect_Execute_PlanFails_SoftError_RealTerraform proves the
+// "terraform plan failed" soft-error branch (Execute's final return, reached
+// when `terraform plan` exits non-zero for a reason OTHER than drift — exit
+// code 1, not the exit code 2 that means "changes present") returns a soft
+// (nil-error) message rather than propagating a Go error, mirroring
+// TestDriftDetect_Execute_InitFails_SoftError above for the sibling branch.
+//
+// A nonexistent -var-file path is used to fail `plan` deterministically and
+// without any network dependency: init succeeds against the same
+// zero-network terraform_data fixture used elsewhere in this file, so the
+// failure is isolated to the plan step itself.
+func TestDriftDetect_Execute_PlanFails_SoftError_RealTerraform(t *testing.T) {
+	requireTerraform(t)
+
+	dir := t.TempDir()
+	tf := "resource \"terraform_data\" \"example\" {\n  input = \"hello\"\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "main.tf"), []byte(tf), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	initCmd := exec.Command("terraform", "init", "-input=false", "-no-color")
+	initCmd.Dir = dir
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("terraform init: %v\n%s", err, out)
+	}
+
+	s := &DriftDetectSkill{}
+	input, _ := json.Marshal(map[string]any{
+		"path":     dir,
+		"var_file": filepath.Join(dir, "does-not-exist.tfvars"),
+	})
+	out, err := s.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Execute should return a soft error message, not a Go error: %v", err)
+	}
+	if !strings.Contains(out, "terraform plan failed") {
+		t.Errorf("expected soft plan-failure message, got: %q", out)
+	}
+	if strings.Contains(out, "No drift detected") || strings.Contains(out, "Drift detected") {
+		t.Errorf("a genuine plan failure must not be reported as a drift result either way, got: %q", out)
+	}
+}
+
 // TestValidateSkill_RealDocker_ParsesRealToolOutput proves ValidateSkill's
 // sandboxed path produces the same structured output as its direct-host
 // path (TestValidateSkill_Execute_RealTools_StructuredOutput above), but
@@ -1221,5 +1267,23 @@ func TestValidateSkill_RealDocker_ParsesRealToolOutput(t *testing.T) {
 	}
 	if !strings.Contains(out, "Unsupported argument") {
 		t.Errorf("expected real terraform validate diagnostic through the sandbox, got: %q", out)
+	}
+	// "Unsupported argument" also appears verbatim inside RAW terraform
+	// validate -json output (in its "summary" field), so the assertion above
+	// alone can't tell a real parsed summary apart from a regression that
+	// falls back to dumping the raw JSON. Mirror the stronger assertions from
+	// the direct-host counterpart, TestValidateSkill_Execute_RealTools_StructuredOutput,
+	// to actually distinguish the two.
+	if !strings.Contains(out, "main.tf:3") {
+		t.Errorf("expected precise file:line for the unsupported-argument error, got: %q", out)
+	}
+	if !strings.Contains(out, "=== tflint ===") || !strings.Contains(out, "=== terraform validate ===") {
+		t.Fatalf("expected both section headers, got: %q", out)
+	}
+	if strings.Contains(out, `"format_version"`) || strings.Contains(out, `"diagnostics"`) {
+		t.Errorf("expected structured summary, not a raw terraform validate JSON dump: %q", out)
+	}
+	if strings.Contains(out, `"issues"`) || strings.Contains(out, `"rule"`) {
+		t.Errorf("expected structured summary, not a raw tflint JSON dump: %q", out)
 	}
 }

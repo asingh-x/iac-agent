@@ -295,9 +295,26 @@ func TestPermission_SSEStreamReceivesPermissionRequestAndResumes(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("SSE status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		t.Errorf("Content-Type = %q, want text/event-stream", ct)
+	}
+
 	scanner := bufio.NewScanner(resp.Body)
 	gotPermissionRequest := false
-	gotDone := false
+	// gotToolEnd tracks a "tool_end" frame, which InitialSnapshotEvent (see
+	// handler.go) never produces — only the live task_runner event loop
+	// publishes it (task_runner.go, TurnEventToolEnd). Seeing one after
+	// approval proves both that the bash tool actually ran post-approval
+	// (Important 1) and that this stream is receiving genuinely live frames
+	// rather than only the reconnect snapshot (Important 2) — the opening
+	// "permission_request" frame alone can't distinguish the two, since a
+	// task that's already paused by the time the stream opens gets that same
+	// frame type reconstructed from the stored row.
+	gotToolEnd := false
+	terminalType := ""
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
@@ -321,17 +338,26 @@ func TestPermission_SSEStreamReceivesPermissionRequestAndResumes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("post permission: %v", err)
 			}
+			if permResp.StatusCode != http.StatusOK {
+				t.Fatalf("permission approve status = %d, want 200", permResp.StatusCode)
+			}
 			permResp.Body.Close()
 		}
+		if ev["type"] == "tool_end" {
+			gotToolEnd = true
+		}
 		if ev["type"] == "done" || ev["type"] == "error" {
-			gotDone = true
+			terminalType, _ = ev["type"].(string)
 			break
 		}
 	}
 	if !gotPermissionRequest {
 		t.Fatal("never received a permission_request SSE event frame")
 	}
-	if !gotDone {
-		t.Fatal("never received a done/error SSE event frame after approving")
+	if !gotToolEnd {
+		t.Error("never received a live tool_end SSE event frame after approval — this should be impossible to satisfy from the reconnect snapshot, so its absence means either the tool never ran or this stream never delivered a genuinely live frame")
+	}
+	if terminalType != "done" {
+		t.Fatalf("expected the task to reach a %q terminal SSE event after approval, got %q — a regression where approval leads to task failure must not pass as if it were success", "done", terminalType)
 	}
 }
