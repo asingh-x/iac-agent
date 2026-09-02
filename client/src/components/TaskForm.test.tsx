@@ -6,7 +6,6 @@ import * as api from "../lib/api";
 
 describe("TaskForm", () => {
   beforeEach(() => {
-    vi.restoreAllMocks();
     vi.spyOn(api, "listModels").mockResolvedValue({ provider: "test", models: [] });
   });
 
@@ -30,9 +29,9 @@ describe("TaskForm", () => {
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ task: "create an s3 bucket" }));
   });
 
-  it("disables the submit button and shows the running label when loading=true", () => {
+  it("disables the submit button and shows the running label when loading=true", async () => {
     render(<TaskForm onSubmit={vi.fn()} loading={true} />);
-    expect(screen.getByRole("button", { name: /agent running/i })).toBeDisabled();
+    expect(await screen.findByRole("button", { name: /agent running/i })).toBeDisabled();
   });
 
   it("does not call onSubmit when clicking submit while loading=true", async () => {

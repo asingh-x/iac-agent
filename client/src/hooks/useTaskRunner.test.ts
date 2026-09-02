@@ -31,7 +31,6 @@ describe("useTaskRunner", () => {
   let fakeES: FakeEventSource;
 
   beforeEach(() => {
-    vi.restoreAllMocks();
     fakeES = new FakeEventSource();
     vi.spyOn(api, "streamTask").mockReturnValue(fakeES as unknown as EventSource);
     vi.spyOn(api, "submitTask").mockResolvedValue({ task_id: "task-1" });
