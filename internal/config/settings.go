@@ -11,19 +11,19 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Port                int    `toml:"port"`
-	PostgresURL         string `toml:"postgres_url"` // postgres://user:pass@host:5432/db?sslmode=disable
-	QueueDriver         string `toml:"queue_driver"` // memory (default) | nats
-	NatsURL             string `toml:"nats_url"`     // nats://host:4222
-	PostgresQueueDSN    string `toml:"postgres_queue_dsn"`          // defaults to DB_URL if empty
+	Port                     int    `toml:"port"`
+	PostgresURL              string `toml:"postgres_url"`                // postgres://user:pass@host:5432/db?sslmode=disable
+	QueueDriver              string `toml:"queue_driver"`                // memory (default) | nats | postgres
+	NatsURL                  string `toml:"nats_url"`                    // nats://host:4222
+	PostgresQueueDSN         string `toml:"postgres_queue_dsn"`          // defaults to DB_URL if empty
 	PostgresQueueLeaseTTL    int    `toml:"postgres_queue_lease_ttl"`    // seconds; default 300 (5 min, matches natsAckWait)
 	PostgresQueueMaxAttempts int    `toml:"postgres_queue_max_attempts"` // default 5, matches NATS's hardcoded MaxDeliver(5)
-	LLMConcurrency      int    `toml:"llm_concurrency"`
-	PerUserConcurrency  int    `toml:"per_user_concurrency"`
-	QueueBuffer         int    `toml:"queue_buffer"`
-	NATSMaxMsgs         int    `toml:"nats_max_msgs"`         // max total backlog across all named NATS queues sharing the TF_AGENT stream (backpressure); default 5000
-	ShutdownGracePeriod int    `toml:"shutdown_grace_period"` // seconds; default 60. How long to wait for in-flight tasks to finish before force-cancelling on shutdown.
-	StaleTaskMaxAge     int    `toml:"stale_task_max_age"`    // seconds; default 7200 (2 hours). Age-based reconciliation backstop (db.Store.FailTasksOlderThan, run periodically from cmd/server/main.go) for a task whose queue delivery is abandoned/redelivered until it exhausts the queue's max-delivery-attempts and never reaches a terminal DB status any other way. Deliberately well above Agent.MaxTaskDuration's own default (1800s / 30 minutes): that field bounds a task that IS running; this one is a last-resort net for a task that never got a fair shot at running at all, so it must never fire on a task that's merely taking a while.
+	LLMConcurrency           int    `toml:"llm_concurrency"`
+	PerUserConcurrency       int    `toml:"per_user_concurrency"`
+	QueueBuffer              int    `toml:"queue_buffer"`
+	NATSMaxMsgs              int    `toml:"nats_max_msgs"`         // max total backlog across all named NATS queues sharing the TF_AGENT stream (backpressure); default 5000
+	ShutdownGracePeriod      int    `toml:"shutdown_grace_period"` // seconds; default 60. How long to wait for in-flight tasks to finish before force-cancelling on shutdown.
+	StaleTaskMaxAge          int    `toml:"stale_task_max_age"`    // seconds; default 7200 (2 hours). Age-based reconciliation backstop (db.Store.FailTasksOlderThan, run periodically from cmd/server/main.go) for a task whose queue delivery is abandoned/redelivered until it exhausts the queue's max-delivery-attempts and never reaches a terminal DB status any other way. Deliberately well above Agent.MaxTaskDuration's own default (1800s / 30 minutes): that field bounds a task that IS running; this one is a last-resort net for a task that never got a fair shot at running at all, so it must never fire on a task that's merely taking a while.
 
 	// SemaphoreAcquireTimeout bounds how long a dequeued task will wait for
 	// an LLM concurrency slot (the global semaphore, and separately the
@@ -142,24 +142,24 @@ func Defaults() *Config {
 			MaxTaskDuration:     30 * 60,       // 30 minutes in seconds
 		},
 		Server: ServerConfig{
-			Port:                    8080,
-			LLMConcurrency:          10,
-			PerUserConcurrency:      3,
-			QueueBuffer:             500,
-			NATSMaxMsgs:             5000, // NATS is durable and meant to hold more backlog than the in-memory QueueBuffer (500); keep in sync with queue.DefaultNATSMaxMsgs
+			Port:                     8080,
+			LLMConcurrency:           10,
+			PerUserConcurrency:       3,
+			QueueBuffer:              500,
+			NATSMaxMsgs:              5000, // NATS is durable and meant to hold more backlog than the in-memory QueueBuffer (500); keep in sync with queue.DefaultNATSMaxMsgs
 			PostgresQueueLeaseTTL:    300,  // 5 minutes, matches natsAckWait
 			PostgresQueueMaxAttempts: 5,    // matches NATS's hardcoded MaxDeliver(5)
-			ShutdownGracePeriod:     60,
-			StaleTaskMaxAge:         2 * 60 * 60, // 2 hours in seconds; ~4x Agent.MaxTaskDuration's own 30-minute default, see field comment
-			SemaphoreAcquireTimeout: 5 * 60,      // 5 minutes in seconds, see field comment
-			SandboxEnabled:          false,
-			SandboxImage:            "ghcr.io/asingh-x/iac-agent/sandbox:latest",
-			SandboxMemory:           "512m",
-			SandboxCPUs:             "1",
-			SandboxBackend:          "docker",
-			SandboxKubeNamespace:    "iac-agent-sandbox",
-			SandboxKubeMemory:       "512Mi",
-			SandboxKubeCPUs:         "1",
+			ShutdownGracePeriod:      60,
+			StaleTaskMaxAge:          2 * 60 * 60, // 2 hours in seconds; ~4x Agent.MaxTaskDuration's own 30-minute default, see field comment
+			SemaphoreAcquireTimeout:  5 * 60,      // 5 minutes in seconds, see field comment
+			SandboxEnabled:           false,
+			SandboxImage:             "ghcr.io/asingh-x/iac-agent/sandbox:latest",
+			SandboxMemory:            "512m",
+			SandboxCPUs:              "1",
+			SandboxBackend:           "docker",
+			SandboxKubeNamespace:     "iac-agent-sandbox",
+			SandboxKubeMemory:        "512Mi",
+			SandboxKubeCPUs:          "1",
 		},
 		Permissions: PermissionsConfig{
 			// The product's review gate is the PR, not per-tool-call
