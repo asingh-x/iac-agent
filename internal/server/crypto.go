@@ -23,13 +23,16 @@ var (
 	oldKeys = map[string]keyEntry{} // keyID -> entry, decrypt-only, populated by TF_AGENT_ENCRYPTION_KEYS_OLD
 )
 
-func currentKeyID() string { return current.id }
+func currentKeyID() string     { return current.id }
 func hasOldKey(id string) bool { _, ok := oldKeys[id]; return ok }
 
 // parseKeyEnv splits an optionally-prefixed "<keyID>:<64 hex chars>" entry.
 // A bare 64-hex-char value with no prefix defaults to keyID "v1", preserving
 // every existing deployment's TF_AGENT_ENCRYPTION_KEY value unchanged.
+// Whitespace is trimmed from the entry, matching the file-based key's tolerance
+// for trailing newlines in secrets mounted from files.
 func parseKeyEnv(entry string) (keyEntry, error) {
+	entry = strings.TrimSpace(entry)
 	id := "v1"
 	hexPart := entry
 	if idx := strings.Index(entry, ":"); idx >= 0 {

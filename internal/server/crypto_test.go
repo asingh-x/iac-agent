@@ -252,3 +252,30 @@ func TestLoadEncryptionKey_MalformedOldKeyEntry_Errors(t *testing.T) {
 		t.Error("expected an error for a malformed TF_AGENT_ENCRYPTION_KEYS_OLD entry, got nil")
 	}
 }
+
+func TestLoadEncryptionKey_WithTrailingWhitespace(t *testing.T) {
+	resetKey(t)
+	// Simulate file-based secret with trailing newline (common from kubectl create secret --from-file)
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20\n")
+	if err := LoadEncryptionKey(); err != nil {
+		t.Fatalf("LoadEncryptionKey with trailing newline: %v", err)
+	}
+	if !EncryptionKeyLoaded() {
+		t.Error("key with trailing whitespace should be loaded")
+	}
+	if currentKeyID() != "v1" {
+		t.Errorf("currentKeyID() = %q, want %q", currentKeyID(), "v1")
+	}
+}
+
+func TestLoadEncryptionKey_WithPrefixedKeyIDAndTrailingWhitespace(t *testing.T) {
+	resetKey(t)
+	// Versioned key with leading/trailing whitespace
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "  v2:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20  \n")
+	if err := LoadEncryptionKey(); err != nil {
+		t.Fatalf("LoadEncryptionKey with whitespace: %v", err)
+	}
+	if currentKeyID() != "v2" {
+		t.Errorf("currentKeyID() = %q, want %q", currentKeyID(), "v2")
+	}
+}
