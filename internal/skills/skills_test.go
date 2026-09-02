@@ -531,9 +531,11 @@ func TestCreatePR_Idempotent_ExistingBranchAndPR_ReturnsExistingURL(t *testing.T
 	var createRefCalled, createPRCalled bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/git/ref/heads/main"):
-			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]any{"object": map[string]string{"sha": "base-sha"}})
+		// Deliberately no handler for GET /git/ref/heads/main: on the
+		// fully-idempotent path (branch+PR both already exist) the base SHA
+		// is never needed, so this test asserts that call is skipped
+		// entirely — hitting it falls through to the "unexpected request"
+		// default below and fails the test.
 		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/git/ref/heads/iac-agent"):
 			w.WriteHeader(http.StatusOK) // branch already exists
 			json.NewEncoder(w).Encode(map[string]any{"object": map[string]string{"sha": "branch-sha"}})
@@ -576,7 +578,7 @@ func TestCreatePR_Idempotent_ExistingBranchAndPR_ReturnsExistingURL(t *testing.T
 }
 
 func TestCreatePR_Idempotent_BranchExistsNoPR_ResumesFromPRCreation(t *testing.T) {
-	var createRefCalled bool
+	var createRefCalled, filePutCalled bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/git/ref/heads/main"):
@@ -594,6 +596,7 @@ func TestCreatePR_Idempotent_BranchExistsNoPR_ResumesFromPRCreation(t *testing.T
 		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/contents/"):
 			w.WriteHeader(http.StatusNotFound)
 		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/"):
+			filePutCalled = true
 			w.WriteHeader(http.StatusCreated)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls"):
 			w.WriteHeader(http.StatusCreated)
@@ -617,6 +620,9 @@ func TestCreatePR_Idempotent_BranchExistsNoPR_ResumesFromPRCreation(t *testing.T
 	}
 	if createRefCalled {
 		t.Error("createRef should not be called when the branch already exists")
+	}
+	if !filePutCalled {
+		t.Error("files should be re-uploaded when resuming from the branch-exists-no-PR state")
 	}
 	if !strings.Contains(out, "https://github.com/org/repo/pull/999") {
 		t.Errorf("expected the newly-created PR URL, got: %q", out)

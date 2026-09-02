@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -53,7 +54,7 @@ func (s *CreatePRSkill) Schema() json.RawMessage {
 			},
 			"branch": {
 				"type": "string",
-				"description": "Name of the branch to create"
+				"description": "Suggested branch name (advisory only). When running inside a task, the server derives the actual git ref deterministically from the task ID for idempotency, so the branch actually used may differ from this suggestion."
 			},
 			"title": {
 				"type": "string",
@@ -111,13 +112,7 @@ func (s *CreatePRSkill) Execute(ctx context.Context, input json.RawMessage) (str
 	client := &http.Client{Timeout: 30 * time.Second}
 	gh := &githubClient{client: client, token: token, owner: owner, repo: repo, baseURL: s.apiBase()}
 
-	// Step a: get base SHA from main branch.
-	baseSHA, err := gh.getRef(ctx, "heads/main")
-	if err != nil {
-		return "", fmt.Errorf("CreatePR: get main ref: %w", err)
-	}
-
-	// Step b: create branch, unless it (and possibly a PR) already exist —
+	// Step a: create branch, unless it (and possibly a PR) already exist —
 	// this makes retries/redeliveries of the same task idempotent.
 	exists, err := gh.branchExists(ctx, branch)
 	if err != nil {
@@ -132,19 +127,29 @@ func (s *CreatePRSkill) Execute(ctx context.Context, input json.RawMessage) (str
 		// Branch exists but no PR yet — a prior attempt got partway; resume
 		// from file upload instead of failing on "branch already exists".
 	} else {
+		// Only need the base SHA when actually creating a new branch — on
+		// the fully-idempotent path above we return before ever reaching
+		// here, so a fully-idempotent redelivery makes zero GitHub calls
+		// for this and skips an avoidable failure mode (a transient error
+		// fetching main's SHA would otherwise fail a task that didn't
+		// actually need it).
+		baseSHA, err := gh.getRef(ctx, "heads/main")
+		if err != nil {
+			return "", fmt.Errorf("CreatePR: get main ref: %w", err)
+		}
 		if err := gh.createRef(ctx, "refs/heads/"+branch, baseSHA); err != nil {
 			return "", fmt.Errorf("CreatePR: create branch: %w", err)
 		}
 	}
 
-	// Step c: create/update each file.
+	// Step b: create/update each file.
 	for path, content := range args.Files {
 		if err := gh.createOrUpdateFile(ctx, path, content, branch); err != nil {
 			return "", fmt.Errorf("CreatePR: upload file %s: %w", path, err)
 		}
 	}
 
-	// Step d: open PR.
+	// Step c: open PR.
 	prURL, err := gh.createPR(ctx, args.Title, args.Body, branch, "main")
 	if err != nil {
 		return "", fmt.Errorf("CreatePR: create PR: %w", err)
@@ -231,7 +236,9 @@ func (g *githubClient) branchExists(ctx context.Context, branch string) (bool, e
 }
 
 func (g *githubClient) findOpenPR(ctx context.Context, branch string) (string, bool, error) {
-	path := fmt.Sprintf("/repos/%s/%s/pulls?head=%s:%s&state=all", g.owner, g.repo, g.owner, branch)
+	// Defense-in-depth: the branch value is server-generated today, but
+	// escape it before it lands in a query string regardless.
+	path := fmt.Sprintf("/repos/%s/%s/pulls?head=%s:%s&state=all", g.owner, g.repo, g.owner, url.QueryEscape(branch))
 	body, status, err := g.do(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return "", false, err

@@ -6,6 +6,11 @@ Create a GitHub PR after validation and security scan complete.
 `iac-agent/<short-description>` in kebab-case, max 50 chars total.
 Example: `iac-agent/eks-cluster-prod`
 
+Note: this is a suggestion. When running inside a task, the server overrides
+it with a deterministic branch name derived from the task ID (for
+idempotency on retries), so don't report this suggested name as the actual
+branch in user-facing output unless you've confirmed it's what was used.
+
 ### PR title
 `feat(terraform): <what was generated>` — max 72 chars, imperative mood.
 Example: `feat(terraform): add EKS cluster with managed node groups`
