@@ -6,7 +6,6 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -19,18 +18,20 @@ var validatePrompt string
 
 // ValidateSkill runs tflint and/or terraform validate on a directory.
 type ValidateSkill struct {
-	// executor, when non-nil, routes tflint/terraform invocations through a
-	// sandbox.Executor (e.g. sandbox.DockerExecutor) instead of running them
-	// directly on the host. Nil (the zero value, and what &ValidateSkill{}
-	// still gives you) preserves the original direct-host-exec behavior
-	// exactly — this is what `sandbox_enabled = false` (the default) wires up.
+	// executor routes tflint/terraform invocations through a sandbox.Executor
+	// (e.g. sandbox.DockerExecutor) — sandboxed execution is mandatory, so a
+	// nil executor (the zero value, and what &ValidateSkill{} still gives
+	// you) makes Execute return an error rather than running anything on the
+	// host. The field stays settable directly for tests that supply a fake
+	// executor.
 	executor sandbox.Executor
 }
 
-// NewValidateSkill builds a ValidateSkill. Pass a non-nil executor (built
-// from config.ServerConfig.SandboxEnabled/SandboxImage/...) to run
-// tflint/terraform inside a sandbox; pass nil to keep running them directly
-// on the host, exactly as before this package existed.
+// NewValidateSkill builds a ValidateSkill. executor (built from
+// config.ServerConfig.SandboxImage/SandboxBackend/...) must be non-nil in
+// production — passing nil is supported only so tests can construct a
+// ValidateSkill and separately exercise the "no sandbox executor configured"
+// error path.
 func NewValidateSkill(executor sandbox.Executor) *ValidateSkill {
 	return &ValidateSkill{executor: executor}
 }
@@ -66,6 +67,10 @@ func (s *ValidateSkill) Schema() json.RawMessage {
 }
 
 func (s *ValidateSkill) Execute(ctx context.Context, input json.RawMessage) (string, error) {
+	if s.executor == nil {
+		return "", fmt.Errorf("validate_terraform: no sandbox executor configured")
+	}
+
 	var args struct {
 		Path                 string `json:"path"`
 		RunTflint            *bool  `json:"run_tflint"`
@@ -137,32 +142,19 @@ func (s *ValidateSkill) Execute(ctx context.Context, input json.RawMessage) (str
 	return combined, nil
 }
 
-// runCmd dispatches to s.executor (sandboxed) when set, otherwise runs
-// directly on the host exactly as this function always has.
+// runCmd dispatches to s.executor. Sandboxed execution is mandatory —
+// Execute returns early with an error before this is ever called with a nil
+// executor.
 func (s *ValidateSkill) runCmd(ctx context.Context, dir, name string, args ...string) (string, error) {
-	if s.executor != nil {
-		stdout, stderr, err := s.executor.Run(ctx, dir, name, args...)
-		// Concatenate to preserve this skill's original merged-output display
-		// behavior exactly. Both tflint and terraform validate write their
-		// -json/--format=json payload to stdout only, so the caller's
-		// best-effort JSON parsing (formatTflintResult/
-		// formatTerraformValidateResult) still finds valid JSON at the start
-		// of this combined string in the normal case; any stderr noise just
-		// trails after it, unparsed, same as it always has for the sandboxed
-		// path.
-		return stdout + stderr, err
-	}
-	return runCmd(ctx, dir, name, args...)
-}
-
-func runCmd(ctx context.Context, dir, name string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Dir = dir
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-	err := cmd.Run()
-	return out.String(), err
+	stdout, stderr, err := s.executor.Run(ctx, dir, name, args...)
+	// Concatenate to preserve this skill's original merged-output display
+	// behavior exactly. Both tflint and terraform validate write their
+	// -json/--format=json payload to stdout only, so the caller's
+	// best-effort JSON parsing (formatTflintResult/
+	// formatTerraformValidateResult) still finds valid JSON at the start
+	// of this combined string in the normal case; any stderr noise just
+	// trails after it, unparsed.
+	return stdout + stderr, err
 }
 
 // --- terraform validate -json parsing ---

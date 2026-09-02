@@ -7,8 +7,8 @@ func TestDefaults_AllToolsAutoByDefault(t *testing.T) {
 	// through repo scan, generate, validate, security scan, and file writes
 	// runs autonomously by default. write/edit are path-scoped to the
 	// task's working directory; bash runs on the host under this default
-	// unless sandbox_enabled is set, or the operator overrides bash back to
-	// "ask"/"confirm" in their own config.
+	// unless the operator overrides bash back to "ask"/"confirm" in their
+	// own config.
 	cfg := Defaults()
 
 	autoByDefault := map[string]string{
@@ -83,14 +83,12 @@ func TestDefaults_FallbackStaysAuto(t *testing.T) {
 	}
 }
 
-// TestDefaults_SandboxDisabledByDefault guards against ever flipping the
-// sandbox on by default — it must stay opt-in so `make run`/local dev works
-// unchanged for anyone without Docker running (see docs/sandbox.md).
-func TestDefaults_SandboxDisabledByDefault(t *testing.T) {
+// TestDefaults_SandboxConfigHasSaneDefaults guards the sandbox.Executor
+// config fields' defaults — sandboxed execution is mandatory (see
+// internal/server/task_runner.go's wireAgent), so these must always resolve
+// to something usable out of the box, with no opt-out.
+func TestDefaults_SandboxConfigHasSaneDefaults(t *testing.T) {
 	cfg := Defaults()
-	if cfg.Server.SandboxEnabled {
-		t.Error("SandboxEnabled must default to false")
-	}
 	if cfg.Server.SandboxImage == "" {
 		t.Error("SandboxImage should have a non-empty default")
 	}

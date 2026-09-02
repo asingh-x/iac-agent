@@ -43,9 +43,6 @@ func Load() (*Config, error) {
 	if v := os.Getenv("TF_AGENT_DEBUG"); v == "true" || v == "1" {
 		cfg.Agent.Debug = true
 	}
-	if v := os.Getenv("TF_AGENT_SANDBOX_ENABLED"); v == "true" || v == "1" {
-		cfg.Server.SandboxEnabled = true
-	}
 	if v := os.Getenv("TF_AGENT_SANDBOX_IMAGE"); v != "" {
 		cfg.Server.SandboxImage = v
 	}
