@@ -256,6 +256,90 @@ func TestPermission_ResponseWithoutPendingRequest_Returns409(t *testing.T) {
 	}
 }
 
+// TestPermission_PauseReleasesGlobalSemaphore_SecondTaskRunsConcurrently
+// proves the original, motivating end-to-end bug is fixed: with
+// LLMConcurrency pinned to 1 (the only global slot on the pod), a task
+// paused on a permission prompt must not hold that slot for the whole
+// WaitForInputTimeout — a second, completely independent task must still be
+// able to acquire it and run to completion while the first task is still
+// paused. This is distinct from
+// TestConcurrentAskUserAndPermissionPauses_ShareOneSemaphoreRelease below,
+// which proves concurrent pauses on the SAME task don't double-release a
+// token; this test proves a paused task's release is visible to, and usable
+// by, a DIFFERENT task.
+//
+// sequencedProvider.calls is indexed by a single counter shared across every
+// Stream call regardless of which task made it, so the three scripted
+// responses are consumed strictly in the order this test drives the two
+// tasks: task 1's pausing turn, then task 2's immediate-finish turn, then
+// task 1's post-approval turn. This only works because the test drives them
+// in that exact order too: submit task 1, wait for it to pause, submit task
+// 2, wait for task 2 to finish, approve task 1, wait for task 1 to finish.
+//
+// Against the pre-Task-5 code (semaphore held for the task's entire pause),
+// this test fails: task 2 can never acquire r.sem's single slot while task 1
+// sits in waiting_for_input, so it never reaches "done"/"failed" and the
+// waitForStatus call for secondTaskID times out after 5 seconds.
+func TestPermission_PauseReleasesGlobalSemaphore_SecondTaskRunsConcurrently(t *testing.T) {
+	provider := &sequencedProvider{calls: [][]llm.Event{
+		{ // task 1, turn 1: pause on a bash permission request
+			{Type: llm.EventToolUse, ToolUse: &llm.ToolUseEvent{ID: "call_1", Name: "bash", Input: json.RawMessage(`{"command":"echo first"}`)}},
+			{Type: llm.EventStop, StopReason: "tool_use"},
+		},
+		{ // task 2, turn 1: no tool call, finishes immediately
+			{Type: llm.EventText, Delta: "second task done"},
+			{Type: llm.EventStop, StopReason: "end_turn"},
+		},
+		{ // task 1, turn 2 (after approval): finishes
+			{Type: llm.EventText, Delta: "first task done"},
+			{Type: llm.EventStop, StopReason: "end_turn"},
+		},
+	}}
+	env := permTestEnv(t, provider, func(cfg *config.Config) {
+		cfg.Server.LLMConcurrency = 1 // the exact scenario this fix targets
+	})
+
+	submit1 := env.do("POST", "/v1/tasks", env.memberToken, map[string]any{
+		"input":  map[string]string{"type": "prompt", "text": "run command one"},
+		"output": map[string]string{"type": "print"},
+	})
+	var body1 map[string]string
+	_ = json.NewDecoder(submit1.Body).Decode(&body1)
+	firstTaskID := body1["task_id"]
+
+	got := waitForStatus(t, env, firstTaskID, "waiting_for_input", "done", "failed")
+	if got["status"] != "waiting_for_input" {
+		t.Fatalf("expected first task to pause at waiting_for_input, got status=%v", got["status"])
+	}
+
+	// With only 1 LLMConcurrency slot total and task 1 still paused, task 2
+	// must still be able to acquire the slot and reach "done" within
+	// waitForStatus's 5-second budget — proving task 1 released its slot
+	// rather than holding it for the whole 7-day WaitForInputTimeout.
+	submit2 := env.do("POST", "/v1/tasks", env.memberToken, map[string]any{
+		"input":  map[string]string{"type": "prompt", "text": "run command two"},
+		"output": map[string]string{"type": "print"},
+	})
+	var body2 map[string]string
+	_ = json.NewDecoder(submit2.Body).Decode(&body2)
+	secondTaskID := body2["task_id"]
+
+	final2 := waitForStatus(t, env, secondTaskID, "done", "failed")
+	if final2["status"] != "done" {
+		t.Fatalf("expected second task to complete concurrently with the first task's pause, got status=%v", final2["status"])
+	}
+
+	// Approve the first task so it also finishes and the test cleans up.
+	resp := env.do("POST", "/v1/tasks/"+firstTaskID+"/permission", env.memberToken, map[string]any{"allow": true})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("permission approve status = %d, want 200", resp.StatusCode)
+	}
+	final1 := waitForStatus(t, env, firstTaskID, "done", "failed")
+	if final1["status"] != "done" {
+		t.Fatalf("expected first task to complete after approval, got status=%v", final1["status"])
+	}
+}
+
 // TestConcurrentAskUserAndPermissionPauses_ShareOneSemaphoreRelease is an
 // end-to-end coverage test for the real fan-out scenario a Critical
 // concurrency bug was found in during review of the semaphore-release-on-
