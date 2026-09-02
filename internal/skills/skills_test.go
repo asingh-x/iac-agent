@@ -1130,3 +1130,44 @@ func TestDriftDetect_Execute_NoDrift_RealTerraform(t *testing.T) {
 		t.Errorf("expected 'No drift detected', got: %q", out)
 	}
 }
+
+// TestDriftDetect_Execute_DriftDetected_RealTerraform simulates drift by
+// changing the config after a real apply — DriftDetectSkill only ever runs
+// `plan`, never `apply`, so a config/state mismatch from either a live
+// infra change or a local edit surfaces identically as a plan diff.
+func TestDriftDetect_Execute_DriftDetected_RealTerraform(t *testing.T) {
+	requireTerraform(t)
+
+	dir := t.TempDir()
+	tfPath := filepath.Join(dir, "main.tf")
+	original := "resource \"terraform_data\" \"example\" {\n  input = \"hello\"\n}\n"
+	if err := os.WriteFile(tfPath, []byte(original), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	initCmd := exec.Command("terraform", "init", "-input=false", "-no-color")
+	initCmd.Dir = dir
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("terraform init: %v\n%s", err, out)
+	}
+	applyCmd := exec.Command("terraform", "apply", "-auto-approve", "-input=false", "-no-color")
+	applyCmd.Dir = dir
+	if out, err := applyCmd.CombinedOutput(); err != nil {
+		t.Fatalf("terraform apply: %v\n%s", err, out)
+	}
+
+	changed := "resource \"terraform_data\" \"example\" {\n  input = \"changed\"\n}\n"
+	if err := os.WriteFile(tfPath, []byte(changed), 0o644); err != nil {
+		t.Fatalf("rewrite fixture: %v", err)
+	}
+
+	s := &DriftDetectSkill{}
+	input, _ := json.Marshal(map[string]any{"path": dir})
+	out, err := s.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(out, "Drift detected") {
+		t.Errorf("expected 'Drift detected', got: %q", out)
+	}
+}
