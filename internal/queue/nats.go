@@ -195,13 +195,16 @@ func (q *NATSQueue) Pop(ctx context.Context) (Item, Delivery, error) {
 	}
 }
 
-// Len returns the approximate number of pending messages in the stream.
+// Len returns the number of pending (not-yet-delivered) messages on this
+// queue's own subject — via this queue's durable consumer's NumPending,
+// not the whole shared TF_AGENT stream's total, since multiple named
+// queues share one stream (see natsStream, natsSubject).
 func (q *NATSQueue) Len() int {
-	info, err := q.js.StreamInfo(natsStream)
+	info, err := q.js.ConsumerInfo(natsStream, natsDurable(q.name))
 	if err != nil {
 		return 0
 	}
-	return int(info.State.Msgs)
+	return int(info.NumPending)
 }
 
 // Close closes the NATS connection, without unsubscribing first.
