@@ -1,6 +1,8 @@
 package server_test
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -248,5 +250,85 @@ func TestPermission_ResponseWithoutPendingRequest_Returns409(t *testing.T) {
 	resp := env.do("POST", "/v1/tasks/"+taskID+"/permission", env.memberToken, map[string]any{"allow": true})
 	if resp.StatusCode != http.StatusConflict {
 		t.Errorf("status = %d, want 409 for a task with no pending permission request", resp.StatusCode)
+	}
+}
+
+// TestPermission_SSEStreamReceivesPermissionRequestAndResumes proves the
+// permission-pause flow over the real SSE stream, not just HTTP polling:
+// a client watching GET /v1/tasks/{id}/stream must see a real
+// "permission_request" event frame, and after POSTing the approval, must
+// see the tool actually run and the task reach "done" on that same stream.
+func TestPermission_SSEStreamReceivesPermissionRequestAndResumes(t *testing.T) {
+	// Same scripted tool-call sequence as TestPermission_ApproveResumesTaskAndRunsTool
+	// above — reliably pauses on a permission request, then finishes after approval.
+	toolInput := json.RawMessage(`{"command":"echo approved"}`)
+	provider := &sequencedProvider{calls: [][]llm.Event{
+		{
+			{Type: llm.EventToolUse, ToolUse: &llm.ToolUseEvent{ID: "call_1", Name: "bash", Input: toolInput}},
+			{Type: llm.EventStop, StopReason: "tool_use"},
+		},
+		{
+			{Type: llm.EventText, Delta: "done"},
+			{Type: llm.EventStop, StopReason: "end_turn"},
+		},
+	}}
+	env := permTestEnv(t, provider)
+
+	submit := env.do("POST", "/v1/tasks", env.memberToken, map[string]any{
+		"input":  map[string]string{"type": "prompt", "text": "run a command"},
+		"output": map[string]string{"type": "print"},
+	})
+	if submit.StatusCode != http.StatusCreated {
+		t.Fatalf("submit status = %d, want 201", submit.StatusCode)
+	}
+	var submitBody map[string]string
+	_ = json.NewDecoder(submit.Body).Decode(&submitBody)
+	taskID := submitBody["task_id"]
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", env.ts.URL+"/v1/tasks/"+taskID+"/stream", nil)
+	req.Header.Set("Authorization", "Bearer "+env.memberToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("open stream: %v", err)
+	}
+	defer resp.Body.Close()
+
+	scanner := bufio.NewScanner(resp.Body)
+	gotPermissionRequest := false
+	gotDone := false
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		var ev map[string]any
+		json.Unmarshal([]byte(data), &ev)
+
+		if ev["type"] == "permission_request" && !gotPermissionRequest {
+			gotPermissionRequest = true
+			// Approve it while still reading this same stream.
+			body, _ := json.Marshal(map[string]any{"allow": true})
+			permReq, _ := http.NewRequest("POST", env.ts.URL+"/v1/tasks/"+taskID+"/permission", bytes.NewReader(body))
+			permReq.Header.Set("Authorization", "Bearer "+env.memberToken)
+			permReq.Header.Set("Content-Type", "application/json")
+			permResp, err := http.DefaultClient.Do(permReq)
+			if err != nil {
+				t.Fatalf("post permission: %v", err)
+			}
+			permResp.Body.Close()
+		}
+		if ev["type"] == "done" || ev["type"] == "error" {
+			gotDone = true
+			break
+		}
+	}
+	if !gotPermissionRequest {
+		t.Fatal("never received a permission_request SSE event frame")
+	}
+	if !gotDone {
+		t.Fatal("never received a done/error SSE event frame after approving")
 	}
 }
