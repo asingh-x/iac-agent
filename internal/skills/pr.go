@@ -117,9 +117,24 @@ func (s *CreatePRSkill) Execute(ctx context.Context, input json.RawMessage) (str
 		return "", fmt.Errorf("CreatePR: get main ref: %w", err)
 	}
 
-	// Step b: create branch.
-	if err := gh.createRef(ctx, "refs/heads/"+branch, baseSHA); err != nil {
-		return "", fmt.Errorf("CreatePR: create branch: %w", err)
+	// Step b: create branch, unless it (and possibly a PR) already exist —
+	// this makes retries/redeliveries of the same task idempotent.
+	exists, err := gh.branchExists(ctx, branch)
+	if err != nil {
+		return "", fmt.Errorf("CreatePR: check existing branch: %w", err)
+	}
+	if exists {
+		if prURL, found, err := gh.findOpenPR(ctx, branch); err != nil {
+			return "", fmt.Errorf("CreatePR: check existing PR: %w", err)
+		} else if found {
+			return fmt.Sprintf("Pull request already exists (idempotent retry): %s", prURL), nil
+		}
+		// Branch exists but no PR yet — a prior attempt got partway; resume
+		// from file upload instead of failing on "branch already exists".
+	} else {
+		if err := gh.createRef(ctx, "refs/heads/"+branch, baseSHA); err != nil {
+			return "", fmt.Errorf("CreatePR: create branch: %w", err)
+		}
 	}
 
 	// Step c: create/update each file.
@@ -204,6 +219,36 @@ func (g *githubClient) getRef(ctx context.Context, ref string) (string, error) {
 		return "", fmt.Errorf("parse ref response: %w", err)
 	}
 	return result.Object.SHA, nil
+}
+
+func (g *githubClient) branchExists(ctx context.Context, branch string) (bool, error) {
+	path := fmt.Sprintf("/repos/%s/%s/git/ref/heads/%s", g.owner, g.repo, branch)
+	_, status, err := g.do(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return false, err
+	}
+	return status == http.StatusOK, nil
+}
+
+func (g *githubClient) findOpenPR(ctx context.Context, branch string) (string, bool, error) {
+	path := fmt.Sprintf("/repos/%s/%s/pulls?head=%s:%s&state=all", g.owner, g.repo, g.owner, branch)
+	body, status, err := g.do(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return "", false, err
+	}
+	if status != http.StatusOK {
+		return "", false, fmt.Errorf("GitHub API %s returned %d: %s", path, status, string(body))
+	}
+	var results []struct {
+		HTMLURL string `json:"html_url"`
+	}
+	if err := json.Unmarshal(body, &results); err != nil {
+		return "", false, fmt.Errorf("parse PR list response: %w", err)
+	}
+	if len(results) == 0 {
+		return "", false, nil
+	}
+	return results[0].HTMLURL, true, nil
 }
 
 func (g *githubClient) createRef(ctx context.Context, ref, sha string) error {

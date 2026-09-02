@@ -527,6 +527,102 @@ func TestCreatePR_DeterministicBranch_UsesTaskID(t *testing.T) {
 	}
 }
 
+func TestCreatePR_Idempotent_ExistingBranchAndPR_ReturnsExistingURL(t *testing.T) {
+	var createRefCalled, createPRCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/git/ref/heads/main"):
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]any{"object": map[string]string{"sha": "base-sha"}})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/git/ref/heads/iac-agent"):
+			w.WriteHeader(http.StatusOK) // branch already exists
+			json.NewEncoder(w).Encode(map[string]any{"object": map[string]string{"sha": "branch-sha"}})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git/refs"):
+			createRefCalled = true
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/pulls"):
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode([]map[string]string{{"html_url": "https://github.com/org/repo/pull/42"}})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls"):
+			createPRCalled = true
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"html_url": "https://github.com/org/repo/pull/999"})
+		default:
+			t.Errorf("unexpected request on a fully-idempotent retry: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	s := &CreatePRSkill{baseURL: srv.URL}
+	ctx := taskctx.WithCredentials(context.Background(), taskctx.Credentials{GitHubToken: "tok", TaskID: "task-abc-123"})
+	input, _ := json.Marshal(map[string]any{
+		"repo_url": "github.com/org/repo", "branch": "ignored", "title": "t", "body": "b",
+		"files": map[string]string{"main.tf": "content"},
+	})
+	out, err := s.Execute(ctx, input)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if createRefCalled {
+		t.Error("createRef should not be called when the branch already exists")
+	}
+	if createPRCalled {
+		t.Error("createPR should not be called when a PR already exists for this branch")
+	}
+	if !strings.Contains(out, "https://github.com/org/repo/pull/42") {
+		t.Errorf("expected the EXISTING PR URL in output, got: %q", out)
+	}
+}
+
+func TestCreatePR_Idempotent_BranchExistsNoPR_ResumesFromPRCreation(t *testing.T) {
+	var createRefCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/git/ref/heads/main"):
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]any{"object": map[string]string{"sha": "base-sha"}})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/git/ref/heads/iac-agent"):
+			w.WriteHeader(http.StatusOK) // branch already exists (prior attempt got this far)
+			json.NewEncoder(w).Encode(map[string]any{"object": map[string]string{"sha": "branch-sha"}})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git/refs"):
+			createRefCalled = true
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/pulls"):
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode([]any{}) // no PR yet — prior attempt crashed before opening it
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/contents/"):
+			w.WriteHeader(http.StatusNotFound)
+		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/"):
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"html_url": "https://github.com/org/repo/pull/999"})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	s := &CreatePRSkill{baseURL: srv.URL}
+	ctx := taskctx.WithCredentials(context.Background(), taskctx.Credentials{GitHubToken: "tok", TaskID: "task-abc-123"})
+	input, _ := json.Marshal(map[string]any{
+		"repo_url": "github.com/org/repo", "branch": "ignored", "title": "t", "body": "b",
+		"files": map[string]string{"main.tf": "content"},
+	})
+	out, err := s.Execute(ctx, input)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if createRefCalled {
+		t.Error("createRef should not be called when the branch already exists")
+	}
+	if !strings.Contains(out, "https://github.com/org/repo/pull/999") {
+		t.Errorf("expected the newly-created PR URL, got: %q", out)
+	}
+}
+
 // --- ValidateSkill (metadata only — tflint/terraform not required) ---
 
 func TestValidate_Metadata(t *testing.T) {
