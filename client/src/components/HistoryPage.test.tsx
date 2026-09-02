@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen, waitFor, act, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HistoryPage } from "./HistoryPage";
@@ -17,10 +17,6 @@ const sampleTask = (overrides: Partial<TaskDetail> = {}): TaskDetail => ({
 });
 
 describe("HistoryPage", () => {
-  beforeEach(() => {
-    vi.restoreAllMocks();
-  });
-
   it("shows a loading state, then the empty state when there are no tasks", async () => {
     vi.spyOn(api, "listTasks").mockResolvedValue([]);
     render(<HistoryPage onSelectTask={vi.fn()} refreshTrigger={0} />);
@@ -107,5 +103,23 @@ describe("HistoryPage", () => {
     // Changing page size should reset back to page 1.
     await userEvent.selectOptions(screen.getByRole("combobox"), "25");
     expect(screen.getByText(/^task 0$/i)).toBeInTheDocument();
+  });
+
+  it("renders a minutes+seconds duration as 'Xm Ys'", async () => {
+    vi.spyOn(api, "listTasks").mockResolvedValue([
+      sampleTask({ started_at: "2024-01-01T00:00:00.000Z", completed_at: "2024-01-01T00:02:05.000Z" }),
+    ]);
+    render(<HistoryPage onSelectTask={vi.fn()} refreshTrigger={0} />);
+    await waitFor(() => screen.getByText(/create an s3 bucket/i));
+    expect(screen.getByText(/^2m 5s$/)).toBeInTheDocument();
+  });
+
+  it("renders a sub-minute duration as 'Xs'", async () => {
+    vi.spyOn(api, "listTasks").mockResolvedValue([
+      sampleTask({ started_at: "2024-01-01T00:00:00.000Z", completed_at: "2024-01-01T00:00:45.000Z" }),
+    ]);
+    render(<HistoryPage onSelectTask={vi.fn()} refreshTrigger={0} />);
+    await waitFor(() => screen.getByText(/create an s3 bucket/i));
+    expect(screen.getByText(/^45s$/)).toBeInTheDocument();
   });
 });
