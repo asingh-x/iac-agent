@@ -23,12 +23,21 @@ const githubAPIBase = "https://api.github.com"
 
 // CreatePRSkill creates a GitHub PR for generated Terraform files.
 // Input JSON: {"repo_url": string, "branch": string, "title": string, "body": string, "files": {"path": "content"}}
-type CreatePRSkill struct{}
+type CreatePRSkill struct {
+	baseURL string // empty = githubAPIBase (production); overridable in tests
+}
 
 func (s *CreatePRSkill) Name() string                         { return "CreatePR" }
 func (s *CreatePRSkill) IsReadOnly() bool                     { return false }
 func (s *CreatePRSkill) IsDestructive(_ json.RawMessage) bool { return false }
 func (s *CreatePRSkill) Prompt() string                       { return prPrompt }
+
+func (s *CreatePRSkill) apiBase() string {
+	if s.baseURL != "" {
+		return s.baseURL
+	}
+	return githubAPIBase
+}
 
 func (s *CreatePRSkill) Description() string {
 	return "Create a GitHub pull request with the provided files. Requires GITHUB_TOKEN."
@@ -94,7 +103,7 @@ func (s *CreatePRSkill) Execute(ctx context.Context, input json.RawMessage) (str
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
-	gh := &githubClient{client: client, token: token, owner: owner, repo: repo}
+	gh := &githubClient{client: client, token: token, owner: owner, repo: repo, baseURL: s.apiBase()}
 
 	// Step a: get base SHA from main branch.
 	baseSHA, err := gh.getRef(ctx, "heads/main")
@@ -136,10 +145,11 @@ func parseRepoURL(repoURL string) (owner, repo string, err error) {
 }
 
 type githubClient struct {
-	client *http.Client
-	token  string
-	owner  string
-	repo   string
+	client  *http.Client
+	token   string
+	owner   string
+	repo    string
+	baseURL string
 }
 
 func (g *githubClient) do(ctx context.Context, method, path string, body interface{}) ([]byte, int, error) {
@@ -152,7 +162,7 @@ func (g *githubClient) do(ctx context.Context, method, path string, body interfa
 		bodyReader = bytes.NewReader(data)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, githubAPIBase+path, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, g.baseURL+path, bodyReader)
 	if err != nil {
 		return nil, 0, err
 	}
