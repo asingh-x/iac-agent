@@ -360,4 +360,13 @@ func TestHub_ServeSSE_LastEventID_ReplaysMissedEvents(t *testing.T) {
 	if strings.Contains(body, `"text":"first"`) {
 		t.Errorf("must not replay 'first' (seq 1) — client already saw it, got: %q", body)
 	}
+	// "second" must appear exactly once: the replay from the store sends it,
+	// and the live loop reading the leftover local-channel buffer (which
+	// still has it queued, since nothing ever consumed it before this
+	// connection) must not send it again. A plain strings.Contains check
+	// above cannot tell 1 occurrence from N, which is exactly how an earlier
+	// version of this fix passed while still double-delivering "second".
+	if n := strings.Count(body, `"text":"second"`); n != 1 {
+		t.Errorf("event 'second' (seq 2) delivered %d times, want exactly 1 — replay and the live loop both sent it, got: %q", n, body)
+	}
 }

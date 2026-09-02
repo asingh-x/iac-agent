@@ -223,23 +223,33 @@ func (h *Hub) ServeSSE(w http.ResponseWriter, r *http.Request, taskID string, in
 		}
 	}
 
-	// lastEventID is the sequence number, if any, the client says it already
-	// has (from Last-Event-ID). It gates two things below: which backlog gets
-	// replayed from the durable store, and which already-seen events get
-	// filtered back out of the local channel/relay once live reading resumes
-	// (see the filter in the main loop) — a reconnect can land on the same
-	// buffered local channel the previous connection never fully drained
-	// (e.g. it dropped between reading two buffered Publishes), so without
-	// that filter the replay and the leftover buffer would both redeliver the
-	// same events. Zero means "no header" and disables both.
-	var lastEventID int64
+	// replayThreshold is the sequence number, at or below which the live loop
+	// below must suppress redelivery. It starts as the client's own
+	// Last-Event-ID, but once the replay loop actually runs it is advanced to
+	// the highest Seq it sent — GetRunEventsSince returns events in ascending
+	// Seq order (id ASC in Postgres; append order in the in-memory store), so
+	// that's simply the last element. Advancing matters: leaving it at the
+	// raw header value only protects events at-or-before what the client
+	// already claimed to have, but every event replayed just now (all of them
+	// have Seq > the header value, by definition of "missed") is equally at
+	// risk of also still being queued, unconsumed, in the local channel/relay
+	// buffer — a reconnect can land on a local channel a prior connection
+	// never fully drained (e.g. it dropped mid-buffer) — and would otherwise
+	// be sent to the client a second time right after the replay that just
+	// sent it. If nothing was replayed (empty backlog, or replay failed),
+	// replayThreshold stays at the header value, since there is nothing to
+	// advance past. Zero (no header at all) disables the filter entirely.
+	var replayThreshold int64
 	if lastIDStr := r.Header.Get("Last-Event-ID"); lastIDStr != "" && h.eventStore != nil {
 		if lastID, err := strconv.ParseInt(lastIDStr, 10, 64); err == nil {
-			lastEventID = lastID
+			replayThreshold = lastID
 			missed, err := h.eventStore.GetRunEventsSince(r.Context(), taskID, lastID)
 			if err == nil {
 				for _, ev := range missed {
 					writeSSEEvent(w, flusher, ev)
+				}
+				if len(missed) > 0 {
+					replayThreshold = missed[len(missed)-1].Seq
 				}
 			}
 		}
@@ -310,7 +320,7 @@ func (h *Hub) ServeSSE(w http.ResponseWriter, r *http.Request, taskID string, in
 			// local channel that was never drained by a prior connection: the
 			// same already-seen events can otherwise still be sitting in its
 			// buffer.
-			if ev.Seq != 0 && ev.Seq <= lastEventID {
+			if ev.Seq != 0 && ev.Seq <= replayThreshold {
 				continue
 			}
 			writeSSEEvent(w, flusher, ev)
