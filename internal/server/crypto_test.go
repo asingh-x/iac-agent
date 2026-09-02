@@ -414,6 +414,89 @@ func TestEncryptDecrypt_EmptyString_Unchanged(t *testing.T) {
 	}
 }
 
+func TestDecrypt_LegacyCiphertext_AfterRotation_FallsBackToOldKey(t *testing.T) {
+	// Reproduces the exact "first rotation" scenario from
+	// docs/configuration.md: a token was encrypted (and never re-saved)
+	// while its key was still current. After rotation that key moves to
+	// TF_AGENT_ENCRYPTION_KEYS_OLD and a new key becomes current, but the
+	// stored ciphertext is still prefix-less (legacy format) since it was
+	// never re-encrypted. Decrypt must still recover it by falling back
+	// through oldKeys instead of only ever trying the new current key.
+	resetKey(t)
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	if err := LoadEncryptionKey(); err != nil {
+		t.Fatalf("LoadEncryptionKey: %v", err)
+	}
+	// Produce a genuine legacy-format ciphertext (no keyID prefix) using the
+	// key that is about to become "old" -- this is what every pre-existing
+	// stored token looks like at the moment of rotation.
+	legacy := encryptRaw(t, current.key, "pre-rotation token")
+
+	// Rotate: the key that produced `legacy` (bare, defaults to id "v1")
+	// becomes old, a fresh key becomes current as "v2".
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "v2:202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f")
+	t.Setenv("TF_AGENT_ENCRYPTION_KEYS_OLD", "v1:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	if err := LoadEncryptionKey(); err != nil {
+		t.Fatalf("LoadEncryptionKey (post-rotation): %v", err)
+	}
+
+	pt, err := Decrypt(legacy)
+	if err != nil {
+		t.Fatalf("Decrypt legacy ciphertext after rotation: %v", err)
+	}
+	if pt != "pre-rotation token" {
+		t.Errorf("Decrypt = %q, want %q", pt, "pre-rotation token")
+	}
+}
+
+func TestDecrypt_LegacyCiphertext_NoMatchingKey_Errors(t *testing.T) {
+	// A legacy ciphertext that matches neither the current key nor any old
+	// key (e.g. encrypted under a key that has since been dropped entirely
+	// from TF_AGENT_ENCRYPTION_KEYS_OLD) must still fail loudly rather than
+	// silently mis-decrypting or panicking.
+	resetKey(t)
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "v2:202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f")
+	t.Setenv("TF_AGENT_ENCRYPTION_KEYS_OLD", "v1:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	if err := LoadEncryptionKey(); err != nil {
+		t.Fatalf("LoadEncryptionKey: %v", err)
+	}
+
+	orphanKey := make([]byte, 32)
+	for i := range orphanKey {
+		orphanKey[i] = byte(199 - i)
+	}
+	legacy := encryptRaw(t, orphanKey, "orphaned token")
+
+	if _, err := Decrypt(legacy); err == nil {
+		t.Error("expected error decrypting a legacy ciphertext that matches neither current nor any old key")
+	}
+}
+
+func TestLoadEncryptionKey_OldKeyIDCollidesWithCurrent_Errors(t *testing.T) {
+	// Both entries below are bare/unprefixed and so both default to id
+	// "v1" -- an easy configuration mistake. Decrypt always checks
+	// current.id first, so an old-key entry sharing that id would be
+	// silently shadowed and never actually used. This must be rejected at
+	// load time instead.
+	resetKey(t)
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	t.Setenv("TF_AGENT_ENCRYPTION_KEYS_OLD", "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f")
+
+	if err := LoadEncryptionKey(); err == nil {
+		t.Fatal("expected error when a bare old-key entry collides with the current (also bare, id v1) key")
+	}
+}
+
+func TestLoadEncryptionKey_OldKeyIDCollidesWithCurrent_ExplicitIDs_Errors(t *testing.T) {
+	resetKey(t)
+	t.Setenv("TF_AGENT_ENCRYPTION_KEY", "v1:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	t.Setenv("TF_AGENT_ENCRYPTION_KEYS_OLD", "v1:202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f")
+
+	if err := LoadEncryptionKey(); err == nil {
+		t.Fatal("expected error when an explicit old-key id (v1) collides with the current key id (v1)")
+	}
+}
+
 func TestDecrypt_UnknownKeyID_Errors(t *testing.T) {
 	// A ciphertext referencing a key ID that is neither current nor in
 	// oldKeys must fail loudly rather than silently mis-decrypting or
