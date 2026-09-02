@@ -42,8 +42,11 @@ queue_buffer = 500
 # queue_driver = "postgres"
 
 # Postgres queue DSN (only used when queue_driver = "postgres").
-# If unset, defaults to the DB_URL environment variable.
-# postgres_queue_dsn = "postgres://user:pass@host:5432/tfagent-queue?sslmode=disable"
+# If unset, defaults to the DB_URL environment variable. task_queue lives in
+# the same database as everything else (created by the same migration
+# path), so this should normally be the same DSN as postgres_url above, not
+# a separate database.
+# postgres_queue_dsn = "postgres://tfagent:pass@localhost:5432/tfagent?sslmode=disable"
 
 # Postgres queue lease TTL in seconds (only used when queue_driver = "postgres").
 # How long a task lease is valid before expiry and requeue.

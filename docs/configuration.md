@@ -85,7 +85,7 @@ Three queue drivers are available:
 
 - **`memory`** (default): In-memory queue; tasks are lost on restart. Only suitable for development and single-instance deployments.
 - **`nats`**: Durable, clustered NATS JetStream queue. Requires a separate NATS infrastructure (see `NATS_URL`).
-- **`postgres`**: Durable leased task queue backed by Postgres. No separate infrastructure needed — Postgres, which you already require for state storage, also owns the queue. Task leases, retries with backoff, and dead-letter tracking are all handled via the `task_queue` table. **Pick this for on-premises deployments** where you want durable execution without adding a new service dependency.
+- **`postgres`**: Durable leased task queue backed by Postgres. No separate infrastructure needed — Postgres, which you already require for state storage, also owns the queue. Task leases, retries with backoff, and dead-letter tracking are all handled via the `task_queue` table. **Pick this for on-premises deployments** where you want durable execution without adding a new service dependency. **Caveat:** unlike `nats`, this driver has no cross-pod control plane relay wired up — the queue itself is safely durable and shared across replicas, but answer/permission/cancel requests for a running task will fail if load-balanced to a pod that doesn't own it. Fine for a single replica; for multiple replicas either route control-plane requests to the owning pod (sticky routing) or use `queue_driver = "nats"` instead.
 
 ### Postgres queue configuration (config.toml only)
 
@@ -96,8 +96,11 @@ When `queue_driver = "postgres"`, the following `[server]` section fields contro
 queue_driver = "postgres"
 
 # Optional: Postgres DSN for the queue.
-# If unset, defaults to the main DB_URL environment variable.
-postgres_queue_dsn = "postgres://user:pass@host:5432/tfagent-queue?sslmode=disable"
+# If unset, defaults to the main DB_URL environment variable. task_queue
+# lives in the same database as everything else (created by the same
+# migration path), so this is normally the same DSN as the main store's,
+# not a separate database.
+postgres_queue_dsn = "postgres://user:pass@host:5432/db?sslmode=disable"
 
 # How long (in seconds) a task lease is valid before expiry and requeue.
 # Default: 300 (5 minutes)
