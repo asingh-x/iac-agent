@@ -42,7 +42,7 @@ The next generation of AI tooling isn't smarter chat. It's specialized skills, a
 
 ## Quick start
 
-**Requirements:** Go 1.26+, Node 20+, an Anthropic API key (or AWS Bedrock credentials), and `terraform` / `tflint` / `checkov` on `PATH` (or the [sandbox](docs/sandbox.md)).
+**Requirements:** Go 1.26+, Node 20+, an Anthropic API key (or AWS Bedrock credentials), and a running Docker daemon. `terraform` / `tflint` / `checkov` always run inside the [sandbox](docs/sandbox.md) container — they're never invoked on the host, so you don't need them on `PATH`.
 
 ```bash
 git clone https://github.com/asingh-x/iac-agent

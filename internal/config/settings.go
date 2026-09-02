@@ -34,11 +34,12 @@ type ServerConfig struct {
 	// instead of accumulating permanently-blocked goroutines.
 	SemaphoreAcquireTimeout int `toml:"semaphore_acquire_timeout"`
 
-	// Sandbox controls whether ValidateSkill/SecurityScanSkill run
-	// terraform/tflint/checkov inside a container (internal/sandbox) instead
-	// of shelling out directly on the host. Defaults to disabled so existing
-	// local dev / `make run` setups without Docker keep working unchanged.
-	SandboxEnabled bool `toml:"sandbox_enabled"`
+	// Sandbox: ValidateSkill/SecurityScanSkill always run
+	// terraform/tflint/checkov inside a container (internal/sandbox) rather
+	// than shelling out directly on the host — this is mandatory, not
+	// configurable. SandboxBackend/SandboxImage/... below select and
+	// configure which sandbox.Executor implementation is used.
+	//
 	// SandboxImage defaults to the published ghcr.io reference (see
 	// Defaults() below), not a bare local tag. This matters for the
 	// Kubernetes backend specifically: an unqualified name like
@@ -47,19 +48,17 @@ type ServerConfig struct {
 	// doesn't exist there — a real image reference is required for that
 	// backend to work at all. The Docker backend benefits too: `docker run`
 	// pulls a fully-qualified reference automatically if it's not already
-	// built locally, so sandbox_enabled=true works out of the box without
-	// requiring `make sandbox-build` first (a local build, or overriding
-	// this to a local tag, still takes precedence via Docker's local cache).
+	// built locally, so this works out of the box without requiring
+	// `make sandbox-build` first (a local build, or overriding this to a
+	// local tag, still takes precedence via Docker's local cache).
 	SandboxImage  string `toml:"sandbox_image"`
 	SandboxMemory string `toml:"sandbox_memory"` // Docker --memory value, e.g. "512m"
 	SandboxCPUs   string `toml:"sandbox_cpus"`   // Docker --cpus value, e.g. "1"
 
-	// SandboxBackend selects which sandbox.Executor implementation
-	// SandboxEnabled wires up: "docker" (default) runs sandbox.DockerExecutor
-	// against a local Docker daemon; "kubernetes" runs sandbox.K8sJobExecutor
-	// against a real cluster (see docs/sandbox.md). Any other value falls
-	// back to "docker" — SandboxEnabled's existing behavior is unchanged for
-	// anyone who never sets this field.
+	// SandboxBackend selects which sandbox.Executor implementation is wired
+	// up: "docker" (default) runs sandbox.DockerExecutor against a local
+	// Docker daemon; "kubernetes" runs sandbox.K8sJobExecutor against a real
+	// cluster (see docs/sandbox.md). Any other value falls back to "docker".
 	SandboxBackend string `toml:"sandbox_backend"`
 	// SandboxKubeNamespace is the (pre-existing — K8sJobExecutor never
 	// creates it) namespace K8sJobExecutor creates its Jobs in.
@@ -147,7 +146,6 @@ func Defaults() *Config {
 			ShutdownGracePeriod:     60,
 			StaleTaskMaxAge:         2 * 60 * 60, // 2 hours in seconds; ~4x Agent.MaxTaskDuration's own 30-minute default, see field comment
 			SemaphoreAcquireTimeout: 5 * 60,      // 5 minutes in seconds, see field comment
-			SandboxEnabled:          false,
 			SandboxImage:            "ghcr.io/asingh-x/iac-agent/sandbox:latest",
 			SandboxMemory:           "512m",
 			SandboxCPUs:             "1",
@@ -163,10 +161,9 @@ func Defaults() *Config {
 			// human reviews the actual diff at the PR — same as any other
 			// GitOps change. write/edit are already path-scoped to the
 			// task's working directory (escapes are rejected). bash runs on
-			// the host unconfirmed under this default; set sandbox_enabled
-			// = true (see docs/sandbox.md) for defense in depth in
-			// production, or override bash to "ask"/"confirm" here if you
-			// want a manual gate before shell commands run.
+			// the host unconfirmed under this default (BashTool has no
+			// sandbox integration); override bash to "ask"/"confirm" here
+			// if you want a manual gate before shell commands run.
 			Bash:    "auto",
 			Write:   "auto",
 			Edit:    "auto",

@@ -207,12 +207,12 @@ under `queue_driver=memory` too.
   prevention) — cross-package calls go through injected function types (e.g.
   `SubAgentRunner`) wired in `internal/server/task_runner.go`.
 - `terraform`/`tflint`/`checkov` (invoked by `ValidateSkill`/
-  `SecurityScanSkill`) can optionally run inside a locked-down Docker
-  container instead of directly on the host process — see
-  `sandbox.md`. Disabled by default (`server.sandbox_enabled = false`);
-  when enabled, `internal/sandbox.DockerExecutor` runs them with
-  `--network=none`, dropped capabilities, resource limits, and a non-root
-  user.
+  `SecurityScanSkill`) always run inside a locked-down Docker container or
+  Kubernetes Job (configurable via `sandbox_backend`) instead of directly
+  on the host process — see `sandbox.md`. `internal/sandbox.DockerExecutor`
+  or `internal/sandbox.K8sJobExecutor` runs them with `--network=none` /
+  deny-all-egress `NetworkPolicy`, dropped capabilities, resource limits,
+  and a non-root user.
 
 ## Enterprise readiness
 
@@ -221,7 +221,7 @@ Capabilities relevant to running this for more than one trusted operator, groupe
 - **Access control** — admin/member roles enforced by `adminMiddleware`; per-user API keys (`tfa-` + 40 hex chars), only a SHA-256 hash stored server-side, raw value shown once. Tokens can be regenerated or revoked per user without a restart.
 - **Audit trail** — every admin mutation on a user (create, update, delete, activate/deactivate, token regenerate/revoke) writes an `audit_events` row with the acting admin, the action, and the target, queryable via `GET /v1/admin/audit-log`. Self-action guards stop an admin from deleting, deactivating, or revoking their own account/token.
 - **Secrets at rest** — GitHub and Atlassian tokens in `user_settings` are AES-256-GCM encrypted, decrypted only inside `task_runner.go` immediately before use. Server config secrets (`ANTHROPIC_API_KEY`, `DB_URL`, `TF_AGENT_ADMIN_TOKEN`) are read from environment variables, not the config file — compatible with injection from Kubernetes Secrets, AWS Secrets Manager, or Vault, though none of those are wired in as a native integration.
-- **Tenant isolation for tool execution** — `terraform`/`tflint`/`checkov` can run inside a locked-down Docker container or a Kubernetes `Job`, network-isolated (`--network=none` / a deny-all-egress `NetworkPolicy`, both verified enforced — see `sandbox.md`), non-root, resource-limited. Off by default; the default is still direct host execution, appropriate for a single trusted operator.
+- **Tenant isolation for tool execution** — `terraform`/`tflint`/`checkov` always run inside a locked-down Docker container or Kubernetes `Job` (configurable backend), network-isolated (`--network=none` / a deny-all-egress `NetworkPolicy`, both verified enforced — see `sandbox.md`), non-root, resource-limited. Direct host execution is no longer available.
 - **High availability** — N stateless pod replicas behind a plain load balancer, no sticky sessions required, once `queue_driver=nats` is set. SSE streams and answer/permission/cancel requests are correct regardless of which pod a request lands on (see "Data" above).
 - **Private / compliant LLM backend** — swap the `anthropic` provider for `bedrock` in config to route through a private VPC with no external rate limits, relevant for HIPAA/SOC2-constrained environments. No code change, config only.
 - **Perimeter auth** — every `/v1/*` route requires a bearer token; the server itself has no built-in SSO/SAML/OIDC, so enterprise identity (Okta, Entra ID) is expected to terminate at a reverse proxy in front of it, not inside the app.

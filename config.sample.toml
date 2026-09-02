@@ -34,14 +34,12 @@ per_user_concurrency = 3
 # Default: 500
 queue_buffer = 500
 
-# Run terraform/tflint/checkov (invoked by the Validate and SecurityScan
-# skills) inside a locked-down Docker container instead of directly on the
-# host. See docs/sandbox.md. Requires a local Docker daemon — pulls the
-# published sandbox image automatically, no local build required (run
-# `make sandbox-build` instead if you want a local dev-loop build).
-# Override with env var: TF_AGENT_SANDBOX_ENABLED=true
-# Default: false (unchanged host-exec behavior — no Docker dependency)
-sandbox_enabled = false
+# terraform/tflint/checkov (invoked by the Validate and SecurityScan skills)
+# always run inside a locked-down sandbox container — this is mandatory, not
+# configurable. See docs/sandbox.md. The default "docker" backend requires a
+# local Docker daemon and pulls the published sandbox image automatically,
+# no local build required (run `make sandbox-build` instead if you want a
+# local dev-loop build); see sandbox_backend below for the Kubernetes option.
 
 # Image used by the sandbox. Defaults to the published, publicly-pullable
 # image (built from docker/sandbox/Dockerfile, pushed multi-arch
@@ -57,9 +55,9 @@ sandbox_enabled = false
 # sandbox_memory = "512m"
 # sandbox_cpus = "1"
 
-# Which sandbox.Executor backend sandbox_enabled wires up: "docker" (local
-# Docker daemon, single node) or "kubernetes" (a real cluster, multi-node —
-# see docs/sandbox.md for what this needs and what was verified).
+# Which sandbox.Executor backend is used: "docker" (local Docker daemon,
+# single node) or "kubernetes" (a real cluster, multi-node — see
+# docs/sandbox.md for what this needs and what was verified).
 # Override with env var: TF_AGENT_SANDBOX_BACKEND=kubernetes
 # Default: "docker"
 # sandbox_backend = "docker"
@@ -161,10 +159,9 @@ debug = false
 # All tools, including bash/write/edit, default to "auto" — the review gate
 # for a generated change is the PR itself, not a per-tool-call prompt.
 # write/edit are path-scoped to the task's working directory (escapes are
-# rejected); bash runs on the host unconfirmed under this default, so set
-# sandbox_enabled = true (see docs/sandbox.md) for defense in depth in
-# production, or set bash below to "confirm" if you want a manual gate
-# before shell commands run.
+# rejected); bash runs on the host unconfirmed under this default (bash is
+# not sandboxed — see docs/sandbox.md), so set bash below to "confirm" if
+# you want a manual gate before shell commands run.
 
 [permissions]
 bash    = "auto"

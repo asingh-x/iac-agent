@@ -1,8 +1,10 @@
 package skills
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -653,8 +655,13 @@ func TestValidate_Execute_InvalidInput(t *testing.T) {
 }
 
 func TestValidate_Execute_MissingPath(t *testing.T) {
-	s := &ValidateSkill{}
-	// Missing required path — tools won't be found so we get a soft error result.
+	// Simulate the sandboxed tools not being found (e.g. a stripped-down
+	// sandbox image) via a fakeExecutor that errors on every call, rather
+	// than the old nil-executor host fallback — sandboxed execution is now
+	// mandatory, so a nil executor is a hard error tested separately (see
+	// TestValidateSkill_NilExecutor_NoLongerFallsBackToHost).
+	fe := &fakeExecutor{err: errors.New("exec: \"tflint\": executable file not found in $PATH")}
+	s := NewValidateSkill(fe)
 	input, _ := json.Marshal(map[string]any{"path": t.TempDir()})
 	out, err := s.Execute(context.Background(), input)
 	// Should not return a hard error — tools just won't be available.
@@ -945,8 +952,30 @@ func requireTerraformAndTflint(t *testing.T) {
 	}
 }
 
+// hostExecPassthrough is a sandbox.Executor test double that actually runs
+// the requested command on the host via os/exec, splitting stdout/stderr
+// exactly like sandbox.DockerExecutor.Run does. ValidateSkill/SecurityScanSkill
+// no longer shell out directly (sandboxed execution is mandatory — a nil
+// executor is a hard error, see TestValidateSkill_NilExecutor_NoLongerFallsBackToHost),
+// so real-tool integration tests route through this instead of relying on
+// the removed nil-executor host fallback. It only stands in for a "sandbox"
+// in the sense of implementing the Executor interface — it does not isolate
+// anything, so it's only appropriate for tests.
+type hostExecPassthrough struct{}
+
+func (hostExecPassthrough) Run(ctx context.Context, dir, name string, args ...string) (string, string, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stdout.String(), stderr.String(), err
+}
+
 // TestValidateSkill_Execute_RealTools_StructuredOutput runs ValidateSkill.Execute
-// end-to-end against real terraform and tflint binaries on a deliberately
+// end-to-end against real terraform and tflint binaries (via
+// hostExecPassthrough, standing in for a sandbox.Executor) on a deliberately
 // broken fixture, proving the end-to-end output is the structured summary —
 // concrete file:line + message — rather than a raw JSON dump the model
 // would have to parse itself.
@@ -976,7 +1005,7 @@ func TestValidateSkill_Execute_RealTools_StructuredOutput(t *testing.T) {
 		t.Fatalf("write fixture: %v", err)
 	}
 
-	s := &ValidateSkill{}
+	s := NewValidateSkill(hostExecPassthrough{})
 	input, _ := json.Marshal(map[string]any{"path": dir})
 	out, err := s.Execute(context.Background(), input)
 	if err != nil {
@@ -1027,10 +1056,36 @@ func (f *fakeExecutor) Run(_ context.Context, dir, name string, args ...string) 
 	return f.out, f.errOut, f.err
 }
 
+// TestValidateSkill_NilExecutor_NoLongerFallsBackToHost proves the host-exec
+// fallback path is gone: constructing with a nil executor must not silently
+// run tflint/terraform on the host, it must return an error.
+func TestValidateSkill_NilExecutor_NoLongerFallsBackToHost(t *testing.T) {
+	s := NewValidateSkill(nil)
+	dir := t.TempDir()
+	input, _ := json.Marshal(map[string]any{"path": dir})
+	_, err := s.Execute(context.Background(), input)
+	if err == nil {
+		t.Fatal("expected an error when no sandbox executor is configured — host-exec fallback should be removed")
+	}
+}
+
+// TestSecurityScanSkill_NilExecutor_NoLongerFallsBackToHost is
+// TestValidateSkill_NilExecutor_NoLongerFallsBackToHost's SecurityScanSkill
+// counterpart.
+func TestSecurityScanSkill_NilExecutor_NoLongerFallsBackToHost(t *testing.T) {
+	s := NewSecurityScanSkill(nil)
+	dir := t.TempDir()
+	input, _ := json.Marshal(map[string]any{"path": dir})
+	_, err := s.Execute(context.Background(), input)
+	if err == nil {
+		t.Fatal("expected an error when no sandbox executor is configured — host-exec fallback should be removed")
+	}
+}
+
 func TestNewValidateSkill_NilExecutor_MatchesZeroValue(t *testing.T) {
-	// NewValidateSkill(nil) must behave exactly like &ValidateSkill{} — the
-	// zero value is what pre-sandbox callers (and skills_test.go's other
-	// cases above) already rely on.
+	// NewValidateSkill(nil) must behave exactly like &ValidateSkill{} —
+	// both are the nil-executor zero value that Execute treats as a hard
+	// error (see TestValidateSkill_NilExecutor_NoLongerFallsBackToHost).
 	s := NewValidateSkill(nil)
 	if s.executor != nil {
 		t.Fatalf("expected nil executor, got %#v", s.executor)
@@ -1111,22 +1166,18 @@ func TestSecurityScanSkill_RoutesThroughExecutor(t *testing.T) {
 	}
 }
 
-func TestSecurityScanSkill_NilExecutor_UsesHostPath(t *testing.T) {
-	// With no executor configured (sandbox_enabled = false, the default),
-	// SecurityScanSkill must fall back to checking for checkov on the host
-	// PATH exactly as before this package existed — it must NOT consult
-	// any executor.
+func TestSecurityScanSkill_NilExecutor_ReturnsError(t *testing.T) {
+	// Sandboxed execution is mandatory: with no executor configured,
+	// SecurityScanSkill must return a clear error rather than falling back
+	// to checking for checkov on the host PATH — the host-exec fallback this
+	// test used to cover has been removed (see
+	// TestSecurityScanSkill_NilExecutor_NoLongerFallsBackToHost).
 	s := NewSecurityScanSkill(nil)
 	dir := t.TempDir()
 	input, _ := json.Marshal(map[string]any{"path": dir})
-	out, err := s.Execute(context.Background(), input)
-	if err != nil {
-		t.Fatalf("unexpected hard error: %v", err)
-	}
-	// Without checkov installed in the test environment's PATH (typical CI),
-	// this should be the friendly skip message, not a crash.
-	if out == "" {
-		t.Error("expected non-empty output")
+	_, err := s.Execute(context.Background(), input)
+	if err == nil {
+		t.Fatal("expected an error when no sandbox executor is configured")
 	}
 }
 
