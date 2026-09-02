@@ -39,6 +39,15 @@ var (
 	// the task's durable row, so it can end even if the terminal event never
 	// arrives over the relay (lost message, owning pod died).
 	relayStatusRecheckInterval = 30 * time.Second
+	// publishPersistTimeout bounds the durable event write in Publish. It
+	// MUST be bounded: that write is synchronous, on a hot path (every
+	// streamed text delta — hundreds per task), and runs inside the task's
+	// own event-loop goroutine, so an unbounded wait on a stalled database
+	// wedges the whole task (it can't even reach a pause from there). Long
+	// enough to be irrelevant to a healthy database, short enough that a sick
+	// one degrades to "events stop being replayable" instead of "tasks stop
+	// running".
+	publishPersistTimeout = 5 * time.Second
 )
 
 // EventStore persists an ordered event log per task so a reconnecting SSE
@@ -149,11 +158,19 @@ func (h *Hub) Claim(taskID string) chan ServerEvent {
 func (h *Hub) Publish(taskID string, ev ServerEvent) {
 	if h.eventStore != nil {
 		// Best-effort: a persistence failure must never block live delivery.
-		// context.Background() matches this codebase's existing convention
-		// (see Runner.persistFinalResult) of using a fresh context for a
-		// durable write that must complete independent of the caller's own
-		// (possibly-cancelled) task context.
-		if seq, err := h.eventStore.AppendRunEvent(context.Background(), taskID, ev); err == nil {
+		// A context detached from the caller's matches this codebase's
+		// existing convention (see Runner.persistFinalResult) of using a fresh
+		// context for a durable write that must complete independent of the
+		// caller's own (possibly-cancelled) task context — but bounded by
+		// publishPersistTimeout rather than left open-ended, since this call
+		// is synchronous and on the task's own event-loop goroutine. Blowing
+		// the deadline is handled like every other failure here: the write is
+		// abandoned and logged, ev.Seq stays 0, and the event is still
+		// delivered live below — it just won't be replayable on reconnect.
+		ctx, cancel := context.WithTimeout(context.Background(), publishPersistTimeout)
+		seq, err := h.eventStore.AppendRunEvent(ctx, taskID, ev)
+		cancel()
+		if err == nil {
 			ev.Seq = seq
 		} else if h.logger != nil {
 			h.logger.Error("failed to persist run event", "task_id", taskID, "event_type", ev.Type, "err", err)
@@ -244,12 +261,31 @@ func (h *Hub) ServeSSE(w http.ResponseWriter, r *http.Request, taskID string, in
 		if lastID, err := strconv.ParseInt(lastIDStr, 10, 64); err == nil {
 			replayThreshold = lastID
 			missed, err := h.eventStore.GetRunEventsSince(r.Context(), taskID, lastID)
-			if err == nil {
+			if err == nil && len(missed) > 0 {
 				for _, ev := range missed {
 					writeSSEEvent(w, flusher, ev)
 				}
-				if len(missed) > 0 {
-					replayThreshold = missed[len(missed)-1].Seq
+				last := missed[len(missed)-1]
+				replayThreshold = last.Seq
+				// The replay can itself cover the task's terminal event, and
+				// when it does the stream is over — return, exactly as the
+				// `initial` block above does for a terminal snapshot. This
+				// happens whenever a task finishes in the window between the
+				// client's GET /v1/tasks/{id} (which produced a non-terminal
+				// `initial`, so that block's check didn't fire) and this
+				// query, which is narrow but entirely reachable.
+				//
+				// Nothing below would end the stream on its own: the live loop
+				// suppresses everything at or below replayThreshold, so the
+				// very same terminal event still sitting unconsumed in the
+				// local channel / relay buffer is dropped as a duplicate and
+				// never reaches the loop's own done/error check. The stream
+				// would then sit in the heartbeat loop until the client gave
+				// up — or forever on a relay-only path with no
+				// statusCheck backstop — leaking a goroutine and a connection
+				// per reconnect.
+				if last.Type == "done" || last.Type == "error" {
+					return
 				}
 			}
 		}

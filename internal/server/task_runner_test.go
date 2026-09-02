@@ -395,6 +395,7 @@ func newSemaphoreTestRunner(store db.Store, cfg *config.Config, semTimeout time.
 		sem:              make(chan struct{}, 5),
 		userSems:         map[string]chan struct{}{},
 		userSemLastUsed:  map[string]time.Time{},
+		userSemPaused:    map[string]int{},
 		cancels:          map[string]context.CancelFunc{},
 		answers:          map[string]chan string{},
 		permissions:      map[string]chan bool{},
@@ -564,6 +565,134 @@ func TestSweepIdleUserSemaphores_RemovesOnlyIdleAndEmptyEntries(t *testing.T) {
 	}
 	if _, ok := r.userSems["recent"]; !ok {
 		t.Error("recently-used entry must not be removed")
+	}
+}
+
+// TestSweepIdleUserSemaphores_KeepsEntryWithOpenPause covers the invariant
+// that releasing concurrency slots during an ask_user/permission pause broke.
+// The sweeper's original "an in-use entry always has a recent timestamp"
+// justification held only while a running task kept a token in its channel
+// for its whole lifetime. A paused task now hands that token back, so its
+// user's entry reads len(ch) == 0 while the task is still very much using
+// the slot conceptually — and a pause can run for WaitForInputTimeout (7
+// days by default), many times userSemIdleThreshold. Reaping the entry there
+// would let the user's next task create a fresh, full-capacity channel and
+// run one task more than PerUserConcurrency permits.
+func TestSweepIdleUserSemaphores_KeepsEntryWithOpenPause(t *testing.T) {
+	r := &Runner{
+		logger:          slog.Default(),
+		userSems:        map[string]chan struct{}{},
+		userSemLastUsed: map[string]time.Time{},
+		userSemPaused:   map[string]int{},
+	}
+	now := time.Now()
+
+	// A task for this user is paused: it released its token (so the channel
+	// is empty, indistinguishable from unused by len alone) and its last
+	// dispatch was long enough ago to look idle.
+	paused := make(chan struct{}, 1)
+	r.userSems["paused"] = paused
+	r.userSemLastUsed["paused"] = now.Add(-2 * userSemIdleThreshold)
+	r.userSemPaused["paused"] = 1
+
+	// Control: same shape, no pause open — must still be reaped, so this
+	// test can't pass by simply never reaping anything.
+	r.userSems["idle-empty"] = make(chan struct{}, 1)
+	r.userSemLastUsed["idle-empty"] = now.Add(-2 * userSemIdleThreshold)
+
+	if removed := r.sweepIdleUserSemaphores(now); removed != 1 {
+		t.Errorf("removed = %d, want 1 (only the entry with no open pause)", removed)
+	}
+	if got, ok := r.userSems["paused"]; !ok {
+		t.Fatal("a user with an open pause had their semaphore entry reaped — their next task would get a fresh full-capacity channel and exceed PerUserConcurrency")
+	} else if got != paused {
+		t.Error("the paused user's channel was replaced; the paused task will reacquire against the original one")
+	}
+	if _, ok := r.userSemLastUsed["paused"]; !ok {
+		t.Error("the paused user's timestamp was reaped even though their channel survived")
+	}
+	if _, ok := r.userSems["idle-empty"]; ok {
+		t.Error("the genuinely idle entry should still have been removed")
+	}
+
+	// Once the pause ends the entry becomes reapable again, so the fix
+	// doesn't just pin entries forever.
+	delete(r.userSemPaused, "paused")
+	if removed := r.sweepIdleUserSemaphores(now); removed != 1 {
+		t.Errorf("removed = %d after the pause ended, want 1", removed)
+	}
+	if _, ok := r.userSems["paused"]; ok {
+		t.Error("entry should be reapable again once no pause is open")
+	}
+}
+
+// TestPauseGate_OpenPauseProtectsUserSemaphoreFromSweep is the same guarantee
+// driven through pauseGate's real release/reacquire path (the code Runner.run
+// wires into both pause sites) rather than by poking userSemPaused directly:
+// the act of pausing must be what protects the entry, and the act of resuming
+// must be what un-protects it.
+func TestPauseGate_OpenPauseProtectsUserSemaphoreFromSweep(t *testing.T) {
+	const userID = "user-1"
+
+	r := &Runner{
+		logger:          slog.Default(),
+		sem:             make(chan struct{}, 1),
+		userSems:        map[string]chan struct{}{},
+		userSemLastUsed: map[string]time.Time{},
+		userSemPaused:   map[string]int{},
+	}
+
+	// Stand in for run()'s per-user semaphore section: create the entry,
+	// stamp it, and take this task's one slot.
+	userSem := make(chan struct{}, 1)
+	r.userSems[userID] = userSem
+	r.userSemLastUsed[userID] = time.Now()
+	userSem <- struct{}{}
+	r.sem <- struct{}{}
+
+	pg := &pauseGate{sem: r.sem, userSem: userSem, runner: r, userID: userID}
+
+	// A "now" well past the idle threshold makes the entry maximally
+	// eligible for reaping — the same trick TestUserSemaphoreSweep_
+	// ConcurrentWithDispatch uses, and cheaper than making the production
+	// threshold a test-tunable var.
+	sweepNow := time.Now().Add(2 * userSemIdleThreshold)
+
+	// Sanity check the premise: with no pause open, this entry IS reapable,
+	// so surviving below is a real result and not a quirk of the setup.
+	// (The token is held here, hence len(ch) > 0 saves it; drain it first to
+	// reproduce exactly what a pause leaves behind.)
+	<-userSem
+	if removed := r.sweepIdleUserSemaphores(sweepNow); removed != 1 {
+		t.Fatalf("premise check: removed = %d, want 1 — an idle, empty entry with no pause must be reapable", removed)
+	}
+	// Put it back the way run() would have left it, pre-pause.
+	r.userSems[userID] = userSem
+	r.userSemLastUsed[userID] = time.Now()
+	userSem <- struct{}{}
+
+	pg.release() // the task parks on an ask_user / permission prompt
+
+	if got := len(userSem); got != 0 {
+		t.Fatalf("userSem length after release = %d, want 0 — the pause must actually hand the slot back", got)
+	}
+	if removed := r.sweepIdleUserSemaphores(sweepNow); removed != 0 {
+		t.Errorf("removed = %d during an open pause, want 0", removed)
+	}
+	if got, ok := r.userSems[userID]; !ok || got != userSem {
+		t.Fatal("the paused task's user-semaphore entry was reaped mid-pause")
+	}
+
+	pg.reacquire() // the user answered
+
+	if got := len(userSem); got != 1 {
+		t.Errorf("userSem length after reacquire = %d, want 1", got)
+	}
+	r.userSemMu.Lock()
+	remaining := r.userSemPaused[userID]
+	r.userSemMu.Unlock()
+	if remaining != 0 {
+		t.Errorf("userSemPaused[%q] = %d after the pause ended, want 0 — a leaked count would pin the entry forever", userID, remaining)
 	}
 }
 

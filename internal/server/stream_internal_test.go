@@ -351,7 +351,19 @@ func TestHub_ServeSSE_LastEventID_ReplaysMissedEvents(t *testing.T) {
 	// more live event and close the channel to end the stream.
 	time.Sleep(50 * time.Millisecond)
 	hub.Publish(taskID, ServerEvent{Type: "done"})
-	<-done
+
+	// Bounded, deliberately: an unbounded `<-done` here would hang the whole
+	// package's test binary until the 10-minute go-test panic if ServeSSE ever
+	// stops returning — which is exactly the failure mode
+	// TestServeSSE_ReplayCoveringTerminalEventReturns below covers, and this
+	// test is one event-ordering shift away from tripping over it too (if the
+	// terminal `done` above ever landed inside the replay window rather than
+	// after it). Fail fast with a useful message instead.
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ServeSSE did not return after the task's terminal event was published")
+	}
 
 	body := rec.Body.String()
 	if !strings.Contains(body, "id: 2") || !strings.Contains(body, `"text":"second"`) {
@@ -368,5 +380,201 @@ func TestHub_ServeSSE_LastEventID_ReplaysMissedEvents(t *testing.T) {
 	// version of this fix passed while still double-delivering "second".
 	if n := strings.Count(body, `"text":"second"`); n != 1 {
 		t.Errorf("event 'second' (seq 2) delivered %d times, want exactly 1 — replay and the live loop both sent it, got: %q", n, body)
+	}
+}
+
+// serveSSEReconnect runs ServeSSE with a Last-Event-ID header set, i.e. as a
+// reconnecting client, and returns the response body. Like serveSSEBody it
+// waits only a bounded budget and fails the test if ServeSSE has not returned
+// by then — never an unbounded receive, since "ServeSSE never returns" is
+// precisely the bug the reconnect tests below exist to catch, and an unbounded
+// wait would turn that into a 10-minute hang of the whole test binary rather
+// than a failed test.
+//
+// The request gets a cancellable context that is cancelled on test cleanup, so
+// a ServeSSE that did fail to return doesn't linger for the rest of the run.
+func serveSSEReconnect(t *testing.T, h *Hub, taskID, lastEventID string, budget time.Duration) (string, time.Duration) {
+	t.Helper()
+
+	req := httptest.NewRequest("GET", "/v1/tasks/"+taskID+"/stream", nil)
+	ctx, cancel := context.WithCancel(req.Context())
+	t.Cleanup(cancel)
+	req = req.WithContext(ctx)
+	req.Header.Set("Last-Event-ID", lastEventID)
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	start := time.Now()
+	go func() {
+		defer close(done)
+		h.ServeSSE(rec, req, taskID, nil)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(budget):
+		t.Fatalf("ServeSSE did not return within %v — the replayed terminal event did not end the stream", budget)
+	}
+	return rec.Body.String(), time.Since(start)
+}
+
+// TestServeSSE_ReplayCoveringTerminalEventReturns is the regression test for a
+// Critical bug: a Last-Event-ID replay whose backlog *includes* the task's
+// terminal event left ServeSSE running forever.
+//
+// How it happens: the client's GET /v1/tasks/{id} reports a non-terminal
+// status (so `initial` is non-terminal and the `initial` block's own terminal
+// check doesn't fire), the task then finishes in the narrow window before
+// ServeSSE's replay query runs, and so the durable backlog handed back by
+// GetRunEventsSince ends with the `done`/`error`. The replay loop wrote it out
+// but did not stop; and because the dedup filter suppresses every event at or
+// below replayThreshold, the very same terminal event still queued in the
+// local channel / relay buffer was dropped as a duplicate — so the live loop's
+// own `if ev.Type == "done" || ev.Type == "error" { return }` was never
+// reached. The stream then sat in the heartbeat loop, leaking a goroutine and
+// a connection for every such reconnect.
+//
+// Both subtests fail (by exhausting serveSSEReconnect's budget) against the
+// code before the fix, and pass after it.
+func TestServeSSE_ReplayCoveringTerminalEventReturns(t *testing.T) {
+	// The cross-pod case, and the permanent one: the task ran and finished on
+	// another pod, so this pod has no local channel for it at all, and the
+	// relay's channel is never closed. With no durable-state backstop
+	// installed there is nothing left that could ever end this stream.
+	t.Run("relay path with no durable-state backstop", func(t *testing.T) {
+		shortenStreamTimings(t)
+
+		taskID := "finished-on-another-pod"
+		h := NewHub()
+		h.SetRelay(newStubRelay(4)) // nothing on it: the task is already over
+		store := newFakeEventStore()
+		h.SetEventStore(store)
+
+		// Seed the durable log directly (not via Publish), since the pod that
+		// produced these events is not this one.
+		for _, ev := range []ServerEvent{
+			{Type: "status", Status: "running"},
+			{Type: "text", Text: "applying"},
+			{Type: "done", PRUrl: "https://example.com/pr/42"},
+		} {
+			if _, err := store.AppendRunEvent(context.Background(), taskID, ev); err != nil {
+				t.Fatalf("seeding the event log: %v", err)
+			}
+		}
+
+		// The client saw seq 1 before dropping; the replay owes it seq 2 and
+		// seq 3 — and seq 3 is the terminal event.
+		body, _ := serveSSEReconnect(t, h, taskID, "1", 5*time.Second)
+
+		if !strings.Contains(body, `"type":"done"`) {
+			t.Errorf("terminal event missing from the replay: %q", body)
+		}
+		if !strings.Contains(body, "https://example.com/pr/42") {
+			t.Errorf("replayed terminal event lost its payload: %q", body)
+		}
+		if strings.Contains(body, "task not found") {
+			t.Errorf("stream ended with the not-found error instead of the replayed terminal event: %q", body)
+		}
+	})
+
+	// The same-pod case: this pod owns the task and its local channel still
+	// holds the buffered events (nothing drained them — the prior connection
+	// dropped), including the terminal one, which the dedup filter now
+	// suppresses because the replay just sent it.
+	t.Run("local channel whose buffer the replay already covered", func(t *testing.T) {
+		shortenStreamTimings(t)
+
+		taskID := "finished-here"
+		h := NewHub()
+		store := newFakeEventStore()
+		h.SetEventStore(store)
+
+		h.Claim(taskID)
+		h.Publish(taskID, ServerEvent{Type: "text", Text: "applying"})
+		h.Publish(taskID, ServerEvent{Type: "done", PRUrl: "https://example.com/pr/43"})
+		// Deliberately no h.Close: that models both the window between run()'s
+		// terminal Publish and its hub.Close, and the general case of a local
+		// channel whose buffered events no connection ever consumed. The
+		// stream must end on the replayed terminal event's own merits, not
+		// because the channel happened to be closed underneath it.
+
+		body, _ := serveSSEReconnect(t, h, taskID, "1", 5*time.Second)
+
+		if n := strings.Count(body, `"type":"done"`); n != 1 {
+			t.Errorf("terminal event delivered %d times, want exactly 1: %q", n, body)
+		}
+		if strings.Contains(body, `"text":"applying"`) {
+			t.Errorf("must not replay seq 1, which the client already had: %q", body)
+		}
+	})
+}
+
+// stalledEventStore models a wedged database: AppendRunEvent never completes
+// on its own, it only unblocks when the context it was given is done.
+type stalledEventStore struct {
+	entered chan struct{} // one send per AppendRunEvent call
+}
+
+func (s *stalledEventStore) AppendRunEvent(ctx context.Context, _ string, _ ServerEvent) (int64, error) {
+	select {
+	case s.entered <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return 0, ctx.Err()
+}
+
+func (s *stalledEventStore) GetRunEventsSince(context.Context, string, int64) ([]ServerEvent, error) {
+	return nil, nil
+}
+
+// TestHub_Publish_PersistenceIsBounded proves a stalled event store cannot
+// wedge Hub.Publish. That write is synchronous, happens for every streamed
+// text delta, and runs on the task's own event-loop goroutine — with the
+// original bare context.Background() a database that stopped responding
+// blocked the task's event loop indefinitely (which also meant the task could
+// never reach a pause and give its concurrency slot back). The write is now
+// bounded by publishPersistTimeout, after which it is abandoned and logged and
+// the event is still delivered live, un-replayable but not lost.
+func TestHub_Publish_PersistenceIsBounded(t *testing.T) {
+	restore := publishPersistTimeout
+	publishPersistTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { publishPersistTimeout = restore })
+
+	store := &stalledEventStore{entered: make(chan struct{}, 1)}
+	h := NewHub()
+	h.SetEventStore(store)
+	ch := h.Claim("wedged-db")
+
+	published := make(chan struct{})
+	go func() {
+		defer close(published)
+		h.Publish("wedged-db", ServerEvent{Type: "text", Text: "delta"})
+	}()
+
+	select {
+	case <-store.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Publish never reached the event store")
+	}
+
+	select {
+	case <-published:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Publish did not return after the persistence deadline — a stalled store still wedges the task's event loop")
+	}
+
+	// Live delivery must survive the abandoned write, with no Seq (so the
+	// replay dedup filter, which ignores Seq 0, can't suppress it either).
+	select {
+	case ev := <-ch:
+		if ev.Text != "delta" {
+			t.Errorf("delivered event = %+v, want the published text delta", ev)
+		}
+		if ev.Seq != 0 {
+			t.Errorf("Seq = %d, want 0 for an event whose persistence failed", ev.Seq)
+		}
+	default:
+		t.Error("event was not delivered to the local channel after the persistence timeout")
 	}
 }
