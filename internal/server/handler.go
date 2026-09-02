@@ -291,11 +291,15 @@ func (s *Server) handleSubmitTask(w http.ResponseWriter, r *http.Request) {
 		if outputType == "pr" && req.Output.GitHubToken == "" && us.GitHubToken != "" {
 			if dec, decErr := Decrypt(us.GitHubToken); decErr == nil {
 				req.Output.GitHubToken = dec
+			} else {
+				log.Printf("failed to decrypt stored github_token for user %s: %v", user.ID, decErr)
 			}
 		}
 		if req.Input.AtlassianToken == "" && us.AtlassianToken != "" {
 			if dec, decErr := Decrypt(us.AtlassianToken); decErr == nil {
 				req.Input.AtlassianToken = dec
+			} else {
+				log.Printf("failed to decrypt stored atlassian_token for user %s: %v", user.ID, decErr)
 			}
 		}
 		if req.Input.AtlassianDomain == "" {
@@ -848,12 +852,16 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	if us.GitHubToken != "" {
 		if dec, err := Decrypt(us.GitHubToken); err == nil && dec != "" {
 			ghSet = true
+		} else if err != nil {
+			log.Printf("failed to decrypt stored github_token for user %s: %v", user.ID, err)
 		}
 	}
 	atSet := false
 	if us.AtlassianToken != "" {
 		if dec, err := Decrypt(us.AtlassianToken); err == nil && dec != "" {
 			atSet = true
+		} else if err != nil {
+			log.Printf("failed to decrypt stored atlassian_token for user %s: %v", user.ID, err)
 		}
 	}
 	writeJSON(w, http.StatusOK, settingsResponse{
