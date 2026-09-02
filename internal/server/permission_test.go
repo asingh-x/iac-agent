@@ -305,13 +305,16 @@ func TestPermission_SSEStreamReceivesPermissionRequestAndResumes(t *testing.T) {
 		}
 		data := strings.TrimPrefix(line, "data: ")
 		var ev map[string]any
-		json.Unmarshal([]byte(data), &ev)
+		if err := json.Unmarshal([]byte(data), &ev); err != nil {
+			continue
+		}
 
 		if ev["type"] == "permission_request" && !gotPermissionRequest {
 			gotPermissionRequest = true
-			// Approve it while still reading this same stream.
+			// Approve it while still reading this same stream, bound to the
+			// same deadline as the stream request itself.
 			body, _ := json.Marshal(map[string]any{"allow": true})
-			permReq, _ := http.NewRequest("POST", env.ts.URL+"/v1/tasks/"+taskID+"/permission", bytes.NewReader(body))
+			permReq, _ := http.NewRequestWithContext(ctx, "POST", env.ts.URL+"/v1/tasks/"+taskID+"/permission", bytes.NewReader(body))
 			permReq.Header.Set("Authorization", "Bearer "+env.memberToken)
 			permReq.Header.Set("Content-Type", "application/json")
 			permResp, err := http.DefaultClient.Do(permReq)
