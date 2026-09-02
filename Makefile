@@ -22,7 +22,7 @@ NATS_URL ?= nats://localhost:$(NATS_PORT)
 export DB_URL
 export NATS_URL
 
-.PHONY: build build-server build-ui dev dev-ui run-server run test test-unit test-unit-v test-integration test-all lint vuln clean install tidy doctor infra infra-stop infra-status infra-clean sandbox-build
+.PHONY: build build-server build-ui dev dev-ui run-server run test test-unit test-unit-v test-client test-integration test-all lint vuln clean install tidy doctor infra infra-stop infra-status infra-clean sandbox-build
 
 ## build — builds UI + server binary
 build: build-ui build-server
@@ -59,16 +59,20 @@ run-server:
 ## run — alias for run-server
 run: run-server
 
-## test — alias for test-unit
-test: test-unit
+## test — runs the full unit test suite: Go + React client (canonical "run everything short of infra")
+test: test-unit test-client
 
-## test-unit — runs unit tests only (no external dependencies)
+## test-unit — runs Go unit tests only (no external dependencies)
 test-unit:
 	go test ./... -count=1 -timeout 60s
 
-## test-unit-v — unit tests with verbose output
+## test-unit-v — Go unit tests with verbose output
 test-unit-v:
 	go test ./... -count=1 -v -timeout 60s
+
+## test-client — runs the React client unit test suite (vitest)
+test-client:
+	cd client && npm test
 
 ## test-integration — runs integration tests (requires running infra: make infra)
 test-integration:
@@ -76,8 +80,8 @@ test-integration:
 	DB_URL=$(DB_URL) NATS_URL=$(NATS_URL) \
 	  go test -tags=integration ./... -count=1 -timeout 120s -v
 
-## test-all — runs unit tests then integration tests
-test-all: test-unit test-integration
+## test-all — runs unit tests (Go + client) then integration tests
+test-all: test-unit test-client test-integration
 
 ## lint — run go vet on all packages
 lint:

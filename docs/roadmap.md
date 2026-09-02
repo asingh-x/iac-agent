@@ -8,7 +8,6 @@ that follows the On-Premises Rollout row group below.
 | Category | Status | Priority | Task | Detail |
 |---|---|---|---|---|
 | Reliability & Resilience |  | **P3** | Postgres HA | Replication + automatic failover. Will be provided by the DB infrastructure team as a managed/hosted Postgres instance rather than built here — not this project's scope going forward |
-| Testing |  | **P2** | Frontend unit tests | Add vitest + React Testing Library; cover `useTaskRunner`, `TaskForm`, `OutputPanel`, `HistoryPage`. No test framework is installed yet |
 | Agent Intelligence |  | **P2** | Post-merge rework | Listen for GitHub review comments via webhooks, feed them back as a new task, agent pushes a fixup commit to the same branch |
 | Agent Intelligence |  | **P2** | Merge conflict resolution | Detect conflicts on open PRs via webhook, trigger agent to rebase branch against main and force push. Deliberately not attempted yet — autonomous force-pushing is a design/safety decision that needs a human in the loop, not something to build unsupervised |
 | Agent Intelligence |  | **P3** | Hard-block PR on missing security scan | `SecurityScanSkill` now surfaces a real error when checkov is missing, but `security_scan.md` still tells the agent to note it in the PR body and proceed to CreatePR anyway — nothing yet hard-blocks or requires explicit confirmation before a PR ships with no scan behind it |
