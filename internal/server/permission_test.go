@@ -1,6 +1,8 @@
 package server_test
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -248,5 +250,114 @@ func TestPermission_ResponseWithoutPendingRequest_Returns409(t *testing.T) {
 	resp := env.do("POST", "/v1/tasks/"+taskID+"/permission", env.memberToken, map[string]any{"allow": true})
 	if resp.StatusCode != http.StatusConflict {
 		t.Errorf("status = %d, want 409 for a task with no pending permission request", resp.StatusCode)
+	}
+}
+
+// TestPermission_SSEStreamReceivesPermissionRequestAndResumes proves the
+// permission-pause flow over the real SSE stream, not just HTTP polling:
+// a client watching GET /v1/tasks/{id}/stream must see a real
+// "permission_request" event frame, and after POSTing the approval, must
+// see the tool actually run and the task reach "done" on that same stream.
+func TestPermission_SSEStreamReceivesPermissionRequestAndResumes(t *testing.T) {
+	// Same scripted tool-call sequence as TestPermission_ApproveResumesTaskAndRunsTool
+	// above — reliably pauses on a permission request, then finishes after approval.
+	toolInput := json.RawMessage(`{"command":"echo approved"}`)
+	provider := &sequencedProvider{calls: [][]llm.Event{
+		{
+			{Type: llm.EventToolUse, ToolUse: &llm.ToolUseEvent{ID: "call_1", Name: "bash", Input: toolInput}},
+			{Type: llm.EventStop, StopReason: "tool_use"},
+		},
+		{
+			{Type: llm.EventText, Delta: "done"},
+			{Type: llm.EventStop, StopReason: "end_turn"},
+		},
+	}}
+	env := permTestEnv(t, provider)
+
+	submit := env.do("POST", "/v1/tasks", env.memberToken, map[string]any{
+		"input":  map[string]string{"type": "prompt", "text": "run a command"},
+		"output": map[string]string{"type": "print"},
+	})
+	if submit.StatusCode != http.StatusCreated {
+		t.Fatalf("submit status = %d, want 201", submit.StatusCode)
+	}
+	var submitBody map[string]string
+	_ = json.NewDecoder(submit.Body).Decode(&submitBody)
+	taskID := submitBody["task_id"]
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", env.ts.URL+"/v1/tasks/"+taskID+"/stream", nil)
+	req.Header.Set("Authorization", "Bearer "+env.memberToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("open stream: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("SSE status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		t.Errorf("Content-Type = %q, want text/event-stream", ct)
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	gotPermissionRequest := false
+	// gotToolEnd tracks a "tool_end" frame, which InitialSnapshotEvent (see
+	// handler.go) never produces — only the live task_runner event loop
+	// publishes it (task_runner.go, TurnEventToolEnd). Seeing one after
+	// approval proves both that the bash tool actually ran post-approval
+	// (Important 1) and that this stream is receiving genuinely live frames
+	// rather than only the reconnect snapshot (Important 2) — the opening
+	// "permission_request" frame alone can't distinguish the two, since a
+	// task that's already paused by the time the stream opens gets that same
+	// frame type reconstructed from the stored row.
+	gotToolEnd := false
+	terminalType := ""
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		var ev map[string]any
+		if err := json.Unmarshal([]byte(data), &ev); err != nil {
+			continue
+		}
+
+		if ev["type"] == "permission_request" && !gotPermissionRequest {
+			gotPermissionRequest = true
+			// Approve it while still reading this same stream, bound to the
+			// same deadline as the stream request itself.
+			body, _ := json.Marshal(map[string]any{"allow": true})
+			permReq, _ := http.NewRequestWithContext(ctx, "POST", env.ts.URL+"/v1/tasks/"+taskID+"/permission", bytes.NewReader(body))
+			permReq.Header.Set("Authorization", "Bearer "+env.memberToken)
+			permReq.Header.Set("Content-Type", "application/json")
+			permResp, err := http.DefaultClient.Do(permReq)
+			if err != nil {
+				t.Fatalf("post permission: %v", err)
+			}
+			if permResp.StatusCode != http.StatusOK {
+				t.Fatalf("permission approve status = %d, want 200", permResp.StatusCode)
+			}
+			permResp.Body.Close()
+		}
+		if ev["type"] == "tool_end" {
+			gotToolEnd = true
+		}
+		if ev["type"] == "done" || ev["type"] == "error" {
+			terminalType, _ = ev["type"].(string)
+			break
+		}
+	}
+	if !gotPermissionRequest {
+		t.Fatal("never received a permission_request SSE event frame")
+	}
+	if !gotToolEnd {
+		t.Error("never received a live tool_end SSE event frame after approval — this should be impossible to satisfy from the reconnect snapshot, so its absence means either the tool never ran or this stream never delivered a genuinely live frame")
+	}
+	if terminalType != "done" {
+		t.Fatalf("expected the task to reach a %q terminal SSE event after approval, got %q — a regression where approval leads to task failure must not pass as if it were success", "done", terminalType)
 	}
 }
