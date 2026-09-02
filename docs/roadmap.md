@@ -7,7 +7,6 @@ that follows the On-Premises Rollout row group below.
 
 | Category | Status | Priority | Task | Detail |
 |---|---|---|---|---|
-| Reliability & Resilience |  | **P3** | Encryption key versioning | Store key ID alongside ciphertext to support key rotation without re-encrypting all tokens manually |
 | Reliability & Resilience |  | **P3** | Postgres HA | Replication + automatic failover. Will be provided by the DB infrastructure team as a managed/hosted Postgres instance rather than built here — not this project's scope going forward |
 | Testing |  | **P2** | Frontend unit tests | Add vitest + React Testing Library; cover `useTaskRunner`, `TaskForm`, `OutputPanel`, `HistoryPage`. No test framework is installed yet |
 | Agent Intelligence |  | **P2** | Post-merge rework | Listen for GitHub review comments via webhooks, feed them back as a new task, agent pushes a fixup commit to the same branch |
