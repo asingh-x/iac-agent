@@ -51,6 +51,13 @@ dumping raw JSON — also fixed a bug where a non-zero exit code (the normal
 outcome when either tool finds real issues) discarded valid findings
 entirely in favor of a useless error message.
 
+**GitHub PR creation**: `CreatePRSkill` is now idempotent per task — the
+server derives a deterministic `iac-agent/task-<TaskID>` branch name instead
+of trusting the LLM-suggested one, and checks branch/PR existence on GitHub
+before creating either, so a redelivered or retried task resumes from
+wherever it left off (including a straight-to-existing-PR-URL return)
+instead of failing or opening a duplicate PR.
+
 See `docs/roadmap.md` for what's still open.
 
 ## [0.1.0] — 2026-04-03

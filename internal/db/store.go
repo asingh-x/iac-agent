@@ -79,6 +79,14 @@ type RepoIndexEntry struct {
 	IndexedAt time.Time       `json:"indexed_at"`
 }
 
+// RunEvent is a single event in the ordered event log for a task.
+type RunEvent struct {
+	Seq       int64
+	Type      string
+	Payload   json.RawMessage
+	CreatedAt time.Time
+}
+
 // Store is the persistence interface. Swap implementations without touching callers.
 type Store interface {
 	// Users
@@ -133,6 +141,10 @@ type Store interface {
 	// and call SaveRepoIndex.
 	GetRepoIndex(ctx context.Context, repoID, commitSHA string) (*RepoIndexEntry, error)
 	SaveRepoIndex(ctx context.Context, repoID, commitSHA string, summary json.RawMessage) error
+
+	// Run events — ordered, persistent event log per task for SSE replay.
+	AppendRunEvent(ctx context.Context, taskID, eventType string, payload json.RawMessage) (seq int64, err error)
+	GetRunEventsSince(ctx context.Context, taskID string, sinceSeq int64) ([]RunEvent, error)
 
 	// Ping verifies the database connection is alive.
 	Ping(ctx context.Context) error

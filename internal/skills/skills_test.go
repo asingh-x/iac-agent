@@ -3,6 +3,8 @@ package skills
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/tf-agent/tf-agent/internal/sandbox"
+	"github.com/tf-agent/tf-agent/internal/taskctx"
 )
 
 // --- Registry ---
@@ -469,6 +472,160 @@ func TestCreatePR_MissingToken(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "github_token") {
 		t.Errorf("error should mention github_token: %v", err)
+	}
+}
+
+func TestCreatePR_DeterministicBranch_UsesTaskID(t *testing.T) {
+	var capturedRef string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/git/ref/heads/main"):
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]any{"object": map[string]string{"sha": "base-sha"}})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/git/ref/heads/"):
+			w.WriteHeader(http.StatusNotFound) // branch doesn't exist yet
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git/refs"):
+			var body map[string]string
+			json.NewDecoder(r.Body).Decode(&body)
+			capturedRef = body["ref"]
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/contents/"):
+			w.WriteHeader(http.StatusNotFound) // file doesn't exist yet
+		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/"):
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/pulls"):
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode([]any{}) // no existing PR
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"html_url": "https://github.com/org/repo/pull/1"})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	s := &CreatePRSkill{baseURL: srv.URL}
+	ctx := taskctx.WithCredentials(context.Background(), taskctx.Credentials{
+		GitHubToken: "tok",
+		TaskID:      "task-abc-123",
+	})
+	input, _ := json.Marshal(map[string]any{
+		"repo_url": "github.com/org/repo",
+		"branch":   "whatever-the-llm-suggested",
+		"title":    "test PR",
+		"body":     "test",
+		"files":    map[string]string{"main.tf": "content"},
+	})
+	_, err := s.Execute(ctx, input)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if capturedRef != "refs/heads/iac-agent/task-task-abc-123" {
+		t.Errorf("branch ref = %q, want deterministic task-based ref, not the LLM-suggested name", capturedRef)
+	}
+}
+
+func TestCreatePR_Idempotent_ExistingBranchAndPR_ReturnsExistingURL(t *testing.T) {
+	var createRefCalled, createPRCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		// Deliberately no handler for GET /git/ref/heads/main: on the
+		// fully-idempotent path (branch+PR both already exist) the base SHA
+		// is never needed, so this test asserts that call is skipped
+		// entirely — hitting it falls through to the "unexpected request"
+		// default below and fails the test.
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/git/ref/heads/iac-agent"):
+			w.WriteHeader(http.StatusOK) // branch already exists
+			json.NewEncoder(w).Encode(map[string]any{"object": map[string]string{"sha": "branch-sha"}})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git/refs"):
+			createRefCalled = true
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/pulls"):
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode([]map[string]string{{"html_url": "https://github.com/org/repo/pull/42"}})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls"):
+			createPRCalled = true
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"html_url": "https://github.com/org/repo/pull/999"})
+		default:
+			t.Errorf("unexpected request on a fully-idempotent retry: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	s := &CreatePRSkill{baseURL: srv.URL}
+	ctx := taskctx.WithCredentials(context.Background(), taskctx.Credentials{GitHubToken: "tok", TaskID: "task-abc-123"})
+	input, _ := json.Marshal(map[string]any{
+		"repo_url": "github.com/org/repo", "branch": "ignored", "title": "t", "body": "b",
+		"files": map[string]string{"main.tf": "content"},
+	})
+	out, err := s.Execute(ctx, input)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if createRefCalled {
+		t.Error("createRef should not be called when the branch already exists")
+	}
+	if createPRCalled {
+		t.Error("createPR should not be called when a PR already exists for this branch")
+	}
+	if !strings.Contains(out, "https://github.com/org/repo/pull/42") {
+		t.Errorf("expected the EXISTING PR URL in output, got: %q", out)
+	}
+}
+
+func TestCreatePR_Idempotent_BranchExistsNoPR_ResumesFromPRCreation(t *testing.T) {
+	var createRefCalled, filePutCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/git/ref/heads/main"):
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]any{"object": map[string]string{"sha": "base-sha"}})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/git/ref/heads/iac-agent"):
+			w.WriteHeader(http.StatusOK) // branch already exists (prior attempt got this far)
+			json.NewEncoder(w).Encode(map[string]any{"object": map[string]string{"sha": "branch-sha"}})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git/refs"):
+			createRefCalled = true
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/pulls"):
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode([]any{}) // no PR yet — prior attempt crashed before opening it
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/contents/"):
+			w.WriteHeader(http.StatusNotFound)
+		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/"):
+			filePutCalled = true
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls"):
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"html_url": "https://github.com/org/repo/pull/999"})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	s := &CreatePRSkill{baseURL: srv.URL}
+	ctx := taskctx.WithCredentials(context.Background(), taskctx.Credentials{GitHubToken: "tok", TaskID: "task-abc-123"})
+	input, _ := json.Marshal(map[string]any{
+		"repo_url": "github.com/org/repo", "branch": "ignored", "title": "t", "body": "b",
+		"files": map[string]string{"main.tf": "content"},
+	})
+	out, err := s.Execute(ctx, input)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if createRefCalled {
+		t.Error("createRef should not be called when the branch already exists")
+	}
+	if !filePutCalled {
+		t.Error("files should be re-uploaded when resuming from the branch-exists-no-PR state")
+	}
+	if !strings.Contains(out, "https://github.com/org/repo/pull/999") {
+		t.Errorf("expected the newly-created PR URL, got: %q", out)
 	}
 }
 
@@ -1043,5 +1200,247 @@ func TestSecurityScanSkill_RealDocker_ParsesRealCheckovOutput(t *testing.T) {
 	// no error happened to bubble up.
 	if !strings.Contains(out, "FAILED:") {
 		t.Errorf("expected at least one failed check for the deliberately misconfigured fixture, got: %q", out)
+	}
+}
+
+// --- DriftDetectSkill ---
+
+func TestDriftDetect_Metadata(t *testing.T) {
+	s := &DriftDetectSkill{}
+	if got := s.Name(); got != "detect_drift" {
+		t.Errorf("Name() = %q, want %q", got, "detect_drift")
+	}
+	if !s.IsReadOnly() {
+		t.Error("IsReadOnly() = false, want true")
+	}
+	if s.IsDestructive(nil) {
+		t.Error("IsDestructive() = true, want false")
+	}
+	if s.Prompt() == "" {
+		t.Error("Prompt should be non-empty")
+	}
+}
+
+func TestDriftDetect_Execute_InvalidInput(t *testing.T) {
+	s := &DriftDetectSkill{}
+	_, err := s.Execute(context.Background(), json.RawMessage(`{not valid json`))
+	if err == nil {
+		t.Fatal("expected error for invalid JSON input")
+	}
+	if !strings.Contains(err.Error(), "invalid input") {
+		t.Errorf("expected 'invalid input' in error, got: %v", err)
+	}
+}
+
+func TestDriftDetect_Execute_MissingPath(t *testing.T) {
+	s := &DriftDetectSkill{}
+	input, _ := json.Marshal(map[string]any{})
+	_, err := s.Execute(context.Background(), input)
+	if err == nil {
+		t.Fatal("expected error for missing path")
+	}
+	if !strings.Contains(err.Error(), "path is required") {
+		t.Errorf("expected 'path is required' in error, got: %v", err)
+	}
+}
+
+// requireTerraform skips the test if the terraform binary isn't on PATH.
+// DriftDetectSkill never calls tflint, so it doesn't need
+// requireTerraformAndTflint's stricter two-binary gate.
+func requireTerraform(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("terraform"); err != nil {
+		t.Skip("terraform not installed — skipping real-tool integration test")
+	}
+}
+
+// TestDriftDetect_Execute_NoDrift_RealTerraform proves the "No drift
+// detected" happy path against a real terraform binary. It uses the
+// built-in terraform_data resource (no provider download, no network —
+// same zero-network-dependency convention as
+// TestValidateSkill_Execute_RealTools_StructuredOutput above) and a real
+// `apply` so the state file genuinely matches the config.
+func TestDriftDetect_Execute_NoDrift_RealTerraform(t *testing.T) {
+	requireTerraform(t)
+
+	dir := t.TempDir()
+	tf := "resource \"terraform_data\" \"example\" {\n  input = \"hello\"\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "main.tf"), []byte(tf), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	initCmd := exec.Command("terraform", "init", "-input=false", "-no-color")
+	initCmd.Dir = dir
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("terraform init: %v\n%s", err, out)
+	}
+	applyCmd := exec.Command("terraform", "apply", "-auto-approve", "-input=false", "-no-color")
+	applyCmd.Dir = dir
+	if out, err := applyCmd.CombinedOutput(); err != nil {
+		t.Fatalf("terraform apply: %v\n%s", err, out)
+	}
+
+	s := &DriftDetectSkill{}
+	input, _ := json.Marshal(map[string]any{"path": dir})
+	out, err := s.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(out, "No drift detected") {
+		t.Errorf("expected 'No drift detected', got: %q", out)
+	}
+}
+
+// TestDriftDetect_Execute_DriftDetected_RealTerraform simulates drift by
+// changing the config after a real apply — DriftDetectSkill only ever runs
+// `plan`, never `apply`, so a config/state mismatch from either a live
+// infra change or a local edit surfaces identically as a plan diff.
+func TestDriftDetect_Execute_DriftDetected_RealTerraform(t *testing.T) {
+	requireTerraform(t)
+
+	dir := t.TempDir()
+	tfPath := filepath.Join(dir, "main.tf")
+	original := "resource \"terraform_data\" \"example\" {\n  input = \"hello\"\n}\n"
+	if err := os.WriteFile(tfPath, []byte(original), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	initCmd := exec.Command("terraform", "init", "-input=false", "-no-color")
+	initCmd.Dir = dir
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("terraform init: %v\n%s", err, out)
+	}
+	applyCmd := exec.Command("terraform", "apply", "-auto-approve", "-input=false", "-no-color")
+	applyCmd.Dir = dir
+	if out, err := applyCmd.CombinedOutput(); err != nil {
+		t.Fatalf("terraform apply: %v\n%s", err, out)
+	}
+
+	changed := "resource \"terraform_data\" \"example\" {\n  input = \"changed\"\n}\n"
+	if err := os.WriteFile(tfPath, []byte(changed), 0o644); err != nil {
+		t.Fatalf("rewrite fixture: %v", err)
+	}
+
+	s := &DriftDetectSkill{}
+	input, _ := json.Marshal(map[string]any{"path": dir})
+	out, err := s.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(out, "Drift detected") {
+		t.Errorf("expected 'Drift detected', got: %q", out)
+	}
+}
+
+// TestDriftDetect_Execute_InitFails_SoftError proves an init failure returns
+// a soft (nil-error) message rather than propagating a Go error — an
+// invalid backend type fails deterministically with no network dependency.
+func TestDriftDetect_Execute_InitFails_SoftError(t *testing.T) {
+	requireTerraform(t)
+
+	dir := t.TempDir()
+	tf := "terraform {\n  backend \"invalid_backend_type\" {}\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "main.tf"), []byte(tf), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	s := &DriftDetectSkill{}
+	input, _ := json.Marshal(map[string]any{"path": dir})
+	out, err := s.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Execute should return a soft error message, not a Go error: %v", err)
+	}
+	if !strings.Contains(out, "terraform init failed") {
+		t.Errorf("expected soft init-failure message, got: %q", out)
+	}
+}
+
+// TestDriftDetect_Execute_PlanFails_SoftError_RealTerraform proves the
+// "terraform plan failed" soft-error branch (Execute's final return, reached
+// when `terraform plan` exits non-zero for a reason OTHER than drift — exit
+// code 1, not the exit code 2 that means "changes present") returns a soft
+// (nil-error) message rather than propagating a Go error, mirroring
+// TestDriftDetect_Execute_InitFails_SoftError above for the sibling branch.
+//
+// A nonexistent -var-file path is used to fail `plan` deterministically and
+// without any network dependency: init succeeds against the same
+// zero-network terraform_data fixture used elsewhere in this file, so the
+// failure is isolated to the plan step itself.
+func TestDriftDetect_Execute_PlanFails_SoftError_RealTerraform(t *testing.T) {
+	requireTerraform(t)
+
+	dir := t.TempDir()
+	tf := "resource \"terraform_data\" \"example\" {\n  input = \"hello\"\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "main.tf"), []byte(tf), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	initCmd := exec.Command("terraform", "init", "-input=false", "-no-color")
+	initCmd.Dir = dir
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("terraform init: %v\n%s", err, out)
+	}
+
+	s := &DriftDetectSkill{}
+	input, _ := json.Marshal(map[string]any{
+		"path":     dir,
+		"var_file": filepath.Join(dir, "does-not-exist.tfvars"),
+	})
+	out, err := s.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Execute should return a soft error message, not a Go error: %v", err)
+	}
+	if !strings.Contains(out, "terraform plan failed") {
+		t.Errorf("expected soft plan-failure message, got: %q", out)
+	}
+	if strings.Contains(out, "No drift detected") || strings.Contains(out, "Drift detected") {
+		t.Errorf("a genuine plan failure must not be reported as a drift result either way, got: %q", out)
+	}
+}
+
+// TestValidateSkill_RealDocker_ParsesRealToolOutput proves ValidateSkill's
+// sandboxed path produces the same structured output as its direct-host
+// path (TestValidateSkill_Execute_RealTools_StructuredOutput above), but
+// running terraform/tflint inside the real sandbox container — the
+// real-Docker counterpart SecurityScanSkill already has.
+func TestValidateSkill_RealDocker_ParsesRealToolOutput(t *testing.T) {
+	requireSandboxDocker(t)
+
+	dir := t.TempDir()
+	tf := "resource \"terraform_data\" \"example\" {\n" +
+		"  input = \"hello\"\n" +
+		"  foo   = \"bar\"\n" +
+		"}\n"
+	if err := os.WriteFile(filepath.Join(dir, "main.tf"), []byte(tf), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	executor := sandbox.NewDockerExecutor(sandboxTestImage, "", "")
+	s := NewValidateSkill(executor)
+	input, _ := json.Marshal(map[string]any{"path": dir})
+	out, err := s.Execute(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(out, "Unsupported argument") {
+		t.Errorf("expected real terraform validate diagnostic through the sandbox, got: %q", out)
+	}
+	// "Unsupported argument" also appears verbatim inside RAW terraform
+	// validate -json output (in its "summary" field), so the assertion above
+	// alone can't tell a real parsed summary apart from a regression that
+	// falls back to dumping the raw JSON. Mirror the stronger assertions from
+	// the direct-host counterpart, TestValidateSkill_Execute_RealTools_StructuredOutput,
+	// to actually distinguish the two.
+	if !strings.Contains(out, "main.tf:3") {
+		t.Errorf("expected precise file:line for the unsupported-argument error, got: %q", out)
+	}
+	if !strings.Contains(out, "=== tflint ===") || !strings.Contains(out, "=== terraform validate ===") {
+		t.Fatalf("expected both section headers, got: %q", out)
+	}
+	if strings.Contains(out, `"format_version"`) || strings.Contains(out, `"diagnostics"`) {
+		t.Errorf("expected structured summary, not a raw terraform validate JSON dump: %q", out)
+	}
+	if strings.Contains(out, `"issues"`) || strings.Contains(out, `"rule"`) {
+		t.Errorf("expected structured summary, not a raw tflint JSON dump: %q", out)
 	}
 }

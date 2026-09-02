@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -23,12 +24,21 @@ const githubAPIBase = "https://api.github.com"
 
 // CreatePRSkill creates a GitHub PR for generated Terraform files.
 // Input JSON: {"repo_url": string, "branch": string, "title": string, "body": string, "files": {"path": "content"}}
-type CreatePRSkill struct{}
+type CreatePRSkill struct {
+	baseURL string // empty = githubAPIBase (production); overridable in tests
+}
 
 func (s *CreatePRSkill) Name() string                         { return "CreatePR" }
 func (s *CreatePRSkill) IsReadOnly() bool                     { return false }
 func (s *CreatePRSkill) IsDestructive(_ json.RawMessage) bool { return false }
 func (s *CreatePRSkill) Prompt() string                       { return prPrompt }
+
+func (s *CreatePRSkill) apiBase() string {
+	if s.baseURL != "" {
+		return s.baseURL
+	}
+	return githubAPIBase
+}
 
 func (s *CreatePRSkill) Description() string {
 	return "Create a GitHub pull request with the provided files. Requires GITHUB_TOKEN."
@@ -44,7 +54,7 @@ func (s *CreatePRSkill) Schema() json.RawMessage {
 			},
 			"branch": {
 				"type": "string",
-				"description": "Name of the branch to create"
+				"description": "Suggested branch name (advisory only). When running inside a task, the server derives the actual git ref deterministically from the task ID for idempotency, so the branch actually used may differ from this suggestion."
 			},
 			"title": {
 				"type": "string",
@@ -93,29 +103,54 @@ func (s *CreatePRSkill) Execute(ctx context.Context, input json.RawMessage) (str
 		return "", fmt.Errorf("CreatePR: %w", err)
 	}
 
+	// Derive deterministic branch name from TaskID if available.
+	branch := args.Branch
+	if creds, ok := taskctx.FromContext(ctx); ok && creds.TaskID != "" {
+		branch = "iac-agent/task-" + creds.TaskID
+	}
+
 	client := &http.Client{Timeout: 30 * time.Second}
-	gh := &githubClient{client: client, token: token, owner: owner, repo: repo}
+	gh := &githubClient{client: client, token: token, owner: owner, repo: repo, baseURL: s.apiBase()}
 
-	// Step a: get base SHA from main branch.
-	baseSHA, err := gh.getRef(ctx, "heads/main")
+	// Step a: create branch, unless it (and possibly a PR) already exist —
+	// this makes retries/redeliveries of the same task idempotent.
+	exists, err := gh.branchExists(ctx, branch)
 	if err != nil {
-		return "", fmt.Errorf("CreatePR: get main ref: %w", err)
+		return "", fmt.Errorf("CreatePR: check existing branch: %w", err)
+	}
+	if exists {
+		if prURL, found, err := gh.findOpenPR(ctx, branch); err != nil {
+			return "", fmt.Errorf("CreatePR: check existing PR: %w", err)
+		} else if found {
+			return fmt.Sprintf("Pull request already exists (idempotent retry): %s", prURL), nil
+		}
+		// Branch exists but no PR yet — a prior attempt got partway; resume
+		// from file upload instead of failing on "branch already exists".
+	} else {
+		// Only need the base SHA when actually creating a new branch — on
+		// the fully-idempotent path above we return before ever reaching
+		// here, so a fully-idempotent redelivery makes zero GitHub calls
+		// for this and skips an avoidable failure mode (a transient error
+		// fetching main's SHA would otherwise fail a task that didn't
+		// actually need it).
+		baseSHA, err := gh.getRef(ctx, "heads/main")
+		if err != nil {
+			return "", fmt.Errorf("CreatePR: get main ref: %w", err)
+		}
+		if err := gh.createRef(ctx, "refs/heads/"+branch, baseSHA); err != nil {
+			return "", fmt.Errorf("CreatePR: create branch: %w", err)
+		}
 	}
 
-	// Step b: create branch.
-	if err := gh.createRef(ctx, "refs/heads/"+args.Branch, baseSHA); err != nil {
-		return "", fmt.Errorf("CreatePR: create branch: %w", err)
-	}
-
-	// Step c: create/update each file.
+	// Step b: create/update each file.
 	for path, content := range args.Files {
-		if err := gh.createOrUpdateFile(ctx, path, content, args.Branch); err != nil {
+		if err := gh.createOrUpdateFile(ctx, path, content, branch); err != nil {
 			return "", fmt.Errorf("CreatePR: upload file %s: %w", path, err)
 		}
 	}
 
-	// Step d: open PR.
-	prURL, err := gh.createPR(ctx, args.Title, args.Body, args.Branch, "main")
+	// Step c: open PR.
+	prURL, err := gh.createPR(ctx, args.Title, args.Body, branch, "main")
 	if err != nil {
 		return "", fmt.Errorf("CreatePR: create PR: %w", err)
 	}
@@ -136,10 +171,11 @@ func parseRepoURL(repoURL string) (owner, repo string, err error) {
 }
 
 type githubClient struct {
-	client *http.Client
-	token  string
-	owner  string
-	repo   string
+	client  *http.Client
+	token   string
+	owner   string
+	repo    string
+	baseURL string
 }
 
 func (g *githubClient) do(ctx context.Context, method, path string, body interface{}) ([]byte, int, error) {
@@ -152,7 +188,7 @@ func (g *githubClient) do(ctx context.Context, method, path string, body interfa
 		bodyReader = bytes.NewReader(data)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, githubAPIBase+path, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, g.baseURL+path, bodyReader)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -188,6 +224,38 @@ func (g *githubClient) getRef(ctx context.Context, ref string) (string, error) {
 		return "", fmt.Errorf("parse ref response: %w", err)
 	}
 	return result.Object.SHA, nil
+}
+
+func (g *githubClient) branchExists(ctx context.Context, branch string) (bool, error) {
+	path := fmt.Sprintf("/repos/%s/%s/git/ref/heads/%s", g.owner, g.repo, branch)
+	_, status, err := g.do(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return false, err
+	}
+	return status == http.StatusOK, nil
+}
+
+func (g *githubClient) findOpenPR(ctx context.Context, branch string) (string, bool, error) {
+	// Defense-in-depth: the branch value is server-generated today, but
+	// escape it before it lands in a query string regardless.
+	path := fmt.Sprintf("/repos/%s/%s/pulls?head=%s:%s&state=all", g.owner, g.repo, g.owner, url.QueryEscape(branch))
+	body, status, err := g.do(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return "", false, err
+	}
+	if status != http.StatusOK {
+		return "", false, fmt.Errorf("GitHub API %s returned %d: %s", path, status, string(body))
+	}
+	var results []struct {
+		HTMLURL string `json:"html_url"`
+	}
+	if err := json.Unmarshal(body, &results); err != nil {
+		return "", false, fmt.Errorf("parse PR list response: %w", err)
+	}
+	if len(results) == 0 {
+		return "", false, nil
+	}
+	return results[0].HTMLURL, true, nil
 }
 
 func (g *githubClient) createRef(ctx context.Context, ref, sha string) error {

@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -18,6 +20,7 @@ type ServerEvent struct {
 	PRUrl  string `json:"pr_url,omitempty"` // for type=done
 	Status string `json:"status,omitempty"` // for type=status
 	Error  string `json:"error,omitempty"`  // for type=error
+	Seq    int64  `json:"seq,omitempty"`    // persisted sequence number, 0 if not persisted (see EventStore)
 }
 
 // Timing knobs for ServeSSE. Vars rather than consts purely so tests can
@@ -36,7 +39,25 @@ var (
 	// the task's durable row, so it can end even if the terminal event never
 	// arrives over the relay (lost message, owning pod died).
 	relayStatusRecheckInterval = 30 * time.Second
+	// publishPersistTimeout bounds the durable event write in Publish. It
+	// MUST be bounded: that write is synchronous, on a hot path (every
+	// streamed text delta — hundreds per task), and runs inside the task's
+	// own event-loop goroutine, so an unbounded wait on a stalled database
+	// wedges the whole task (it can't even reach a pause from there). Long
+	// enough to be irrelevant to a healthy database, short enough that a sick
+	// one degrades to "events stop being replayable" instead of "tasks stop
+	// running".
+	publishPersistTimeout = 5 * time.Second
 )
+
+// EventStore persists an ordered event log per task so a reconnecting SSE
+// client can replay anything it missed via Last-Event-ID. Mirrors the
+// EventRelay/ControlRelay decoupling pattern already used in this package —
+// Hub doesn't know about internal/db directly.
+type EventStore interface {
+	AppendRunEvent(ctx context.Context, taskID string, ev ServerEvent) (seq int64, err error)
+	GetRunEventsSince(ctx context.Context, taskID string, sinceSeq int64) ([]ServerEvent, error)
+}
 
 // Hub manages per-task SSE event channels.
 type Hub struct {
@@ -55,6 +76,8 @@ type Hub struct {
 	// statusCheck, if set, reads the task's current durable state (see
 	// SetStatusCheck).
 	statusCheck func(taskID string) *ServerEvent
+	eventStore  EventStore
+	logger      *slog.Logger
 }
 
 func NewHub() *Hub {
@@ -83,6 +106,22 @@ func (h *Hub) SetRelay(relay EventRelay) {
 // single-process deployment where the local channel is always authoritative.
 func (h *Hub) SetStatusCheck(check func(taskID string) *ServerEvent) {
 	h.statusCheck = check
+}
+
+// SetEventStore installs durable event persistence, enabling Last-Event-ID
+// SSE replay in ServeSSE. Call once at startup, same as SetRelay. Unset
+// means no persistence — a disconnected client permanently loses events
+// published while it was away, the existing behavior.
+func (h *Hub) SetEventStore(store EventStore) {
+	h.eventStore = store
+}
+
+// SetLogger installs a logger for best-effort persistence failures (see
+// Publish). Call once at startup, same as SetRelay/SetStatusCheck. Unset
+// means persistence failures are silently swallowed — acceptable for tests,
+// not for production wiring.
+func (h *Hub) SetLogger(logger *slog.Logger) {
+	h.logger = logger
 }
 
 // Create registers a new buffered channel for taskID.
@@ -117,6 +156,27 @@ func (h *Hub) Claim(taskID string) chan ServerEvent {
 // full) and broadcasts it to the cross-pod relay, so a client whose SSE
 // connection landed on a different pod still sees it.
 func (h *Hub) Publish(taskID string, ev ServerEvent) {
+	if h.eventStore != nil {
+		// Best-effort: a persistence failure must never block live delivery.
+		// A context detached from the caller's matches this codebase's
+		// existing convention (see Runner.persistFinalResult) of using a fresh
+		// context for a durable write that must complete independent of the
+		// caller's own (possibly-cancelled) task context — but bounded by
+		// publishPersistTimeout rather than left open-ended, since this call
+		// is synchronous and on the task's own event-loop goroutine. Blowing
+		// the deadline is handled like every other failure here: the write is
+		// abandoned and logged, ev.Seq stays 0, and the event is still
+		// delivered live below — it just won't be replayable on reconnect.
+		ctx, cancel := context.WithTimeout(context.Background(), publishPersistTimeout)
+		seq, err := h.eventStore.AppendRunEvent(ctx, taskID, ev)
+		cancel()
+		if err == nil {
+			ev.Seq = seq
+		} else if h.logger != nil {
+			h.logger.Error("failed to persist run event", "task_id", taskID, "event_type", ev.Type, "err", err)
+		}
+	}
+
 	h.relay.Publish(taskID, ev)
 
 	h.mu.RLock()
@@ -180,6 +240,57 @@ func (h *Hub) ServeSSE(w http.ResponseWriter, r *http.Request, taskID string, in
 		}
 	}
 
+	// replayThreshold is the sequence number, at or below which the live loop
+	// below must suppress redelivery. It starts as the client's own
+	// Last-Event-ID, but once the replay loop actually runs it is advanced to
+	// the highest Seq it sent — GetRunEventsSince returns events in ascending
+	// Seq order (id ASC in Postgres; append order in the in-memory store), so
+	// that's simply the last element. Advancing matters: leaving it at the
+	// raw header value only protects events at-or-before what the client
+	// already claimed to have, but every event replayed just now (all of them
+	// have Seq > the header value, by definition of "missed") is equally at
+	// risk of also still being queued, unconsumed, in the local channel/relay
+	// buffer — a reconnect can land on a local channel a prior connection
+	// never fully drained (e.g. it dropped mid-buffer) — and would otherwise
+	// be sent to the client a second time right after the replay that just
+	// sent it. If nothing was replayed (empty backlog, or replay failed),
+	// replayThreshold stays at the header value, since there is nothing to
+	// advance past. Zero (no header at all) disables the filter entirely.
+	var replayThreshold int64
+	if lastIDStr := r.Header.Get("Last-Event-ID"); lastIDStr != "" && h.eventStore != nil {
+		if lastID, err := strconv.ParseInt(lastIDStr, 10, 64); err == nil {
+			replayThreshold = lastID
+			missed, err := h.eventStore.GetRunEventsSince(r.Context(), taskID, lastID)
+			if err == nil && len(missed) > 0 {
+				for _, ev := range missed {
+					writeSSEEvent(w, flusher, ev)
+				}
+				last := missed[len(missed)-1]
+				replayThreshold = last.Seq
+				// The replay can itself cover the task's terminal event, and
+				// when it does the stream is over — return, exactly as the
+				// `initial` block above does for a terminal snapshot. This
+				// happens whenever a task finishes in the window between the
+				// client's GET /v1/tasks/{id} (which produced a non-terminal
+				// `initial`, so that block's check didn't fire) and this
+				// query, which is narrow but entirely reachable.
+				//
+				// Nothing below would end the stream on its own: the live loop
+				// suppresses everything at or below replayThreshold, so the
+				// very same terminal event still sitting unconsumed in the
+				// local channel / relay buffer is dropped as a duplicate and
+				// never reaches the loop's own done/error check. The stream
+				// would then sit in the heartbeat loop until the client gave
+				// up — or forever on a relay-only path with no
+				// statusCheck backstop — leaking a goroutine and a connection
+				// per reconnect.
+				if last.Type == "done" || last.Type == "error" {
+					return
+				}
+			}
+		}
+	}
+
 	// Subscribe to the cross-pod relay first, before waiting to find out
 	// whether this pod owns the task. NATS core pub/sub has no replay, so
 	// anything the owning pod publishes while we are still deciding would be
@@ -239,6 +350,14 @@ func (h *Hub) ServeSSE(w http.ResponseWriter, r *http.Request, taskID string, in
 			if !open {
 				writeSSEEvent(w, flusher, ServerEvent{Type: "error", Error: "task not found or already completed"})
 				return
+			}
+			// Skip anything the replay above already covered (or the client
+			// already had). This is what makes replay safe to combine with a
+			// local channel that was never drained by a prior connection: the
+			// same already-seen events can otherwise still be sitting in its
+			// buffer.
+			if ev.Seq != 0 && ev.Seq <= replayThreshold {
+				continue
 			}
 			writeSSEEvent(w, flusher, ev)
 			if ev.Type == "done" || ev.Type == "error" {
@@ -306,6 +425,9 @@ func (h *Hub) awaitLocalChannel(ctx context.Context, taskID string, relayCh <-ch
 
 func writeSSEEvent(w http.ResponseWriter, f http.Flusher, ev ServerEvent) {
 	data, _ := json.Marshal(ev)
+	if ev.Seq != 0 {
+		fmt.Fprintf(w, "id: %d\n", ev.Seq)
+	}
 	fmt.Fprintf(w, "data: %s\n\n", data)
 	f.Flush()
 }
