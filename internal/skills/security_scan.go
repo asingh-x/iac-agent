@@ -85,7 +85,8 @@ func (s *SecurityScanSkill) Execute(ctx context.Context, input json.RawMessage) 
 // default) uses.
 func (s *SecurityScanSkill) runHost(scanPath string) (string, error) {
 	if _, err := exec.LookPath("checkov"); err != nil {
-		return "checkov not installed — skipping security scan. Install with: pip install checkov", nil
+		return "checkov not installed — skipping security scan. Install with: pip install checkov",
+			fmt.Errorf("SecurityScan: checkov not installed on PATH")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)

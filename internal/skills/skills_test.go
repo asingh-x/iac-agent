@@ -406,6 +406,27 @@ func TestSecurityScan_Metadata(t *testing.T) {
 	}
 }
 
+func TestSecurityScanSkill_ChecovNotInstalled_ReturnsError(t *testing.T) {
+	// Force the LookPath check to fail regardless of the real host's PATH
+	// by pointing PATH somewhere with no checkov binary.
+	t.Setenv("PATH", t.TempDir())
+
+	s := NewSecurityScanSkill(nil)
+	dir := t.TempDir()
+	input, _ := json.Marshal(map[string]any{"path": dir})
+	out, err := s.Execute(context.Background(), input)
+
+	if err == nil {
+		t.Fatal("expected a real error when checkov is not installed, got nil — a silent skip message can't be distinguished from a real completed scan by anything reading Execute's error value")
+	}
+	if !strings.Contains(err.Error(), "checkov") {
+		t.Errorf("error should mention checkov, got: %v", err)
+	}
+	if !strings.Contains(out, "skipping security scan") {
+		t.Errorf("expected the output text to still explain what happened, got: %q", out)
+	}
+}
+
 // --- CreatePRSkill (metadata + parseRepoURL) ---
 
 func TestParseRepoURL_Valid(t *testing.T) {
@@ -1120,13 +1141,24 @@ func TestSecurityScanSkill_NilExecutor_UsesHostPath(t *testing.T) {
 	dir := t.TempDir()
 	input, _ := json.Marshal(map[string]any{"path": dir})
 	out, err := s.Execute(context.Background(), input)
+
+	// If checkov is not installed, Execute should return a real error
+	// (that callers can distinguish from a successful scan).
+	// If checkov IS installed, it runs successfully with no error.
 	if err != nil {
-		t.Fatalf("unexpected hard error: %v", err)
-	}
-	// Without checkov installed in the test environment's PATH (typical CI),
-	// this should be the friendly skip message, not a crash.
-	if out == "" {
-		t.Error("expected non-empty output")
+		// Checkov not installed — validate the error case per the new behavior
+		if !strings.Contains(err.Error(), "checkov") {
+			t.Errorf("error should mention checkov, got: %v", err)
+		}
+		// Even with an error, the output should explain what happened
+		if !strings.Contains(out, "skipping security scan") {
+			t.Errorf("expected output to explain the skip, got: %q", out)
+		}
+	} else {
+		// Checkov installed — just validate we got some output
+		if out == "" {
+			t.Error("expected non-empty output")
+		}
 	}
 }
 
