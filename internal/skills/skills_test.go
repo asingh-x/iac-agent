@@ -422,8 +422,14 @@ func TestSecurityScanSkill_ChecovNotInstalled_ReturnsError(t *testing.T) {
 	if !strings.Contains(err.Error(), "checkov") {
 		t.Errorf("error should mention checkov, got: %v", err)
 	}
-	if !strings.Contains(out, "skipping security scan") {
-		t.Errorf("expected the output text to still explain what happened, got: %q", out)
+	// The message return value is discarded in production (loop.go only ever
+	// surfaces execErr.Error() to the agent), so the remediation hint must
+	// live in the error itself, not in out.
+	if !strings.Contains(err.Error(), "pip install checkov") {
+		t.Errorf("expected the error to include the install hint, got: %v", err)
+	}
+	if out != "" {
+		t.Errorf("expected empty output on error, got: %q", out)
 	}
 }
 
@@ -1146,13 +1152,15 @@ func TestSecurityScanSkill_NilExecutor_UsesHostPath(t *testing.T) {
 	// (that callers can distinguish from a successful scan).
 	// If checkov IS installed, it runs successfully with no error.
 	if err != nil {
-		// Checkov not installed — validate the error case per the new behavior
+		// Checkov not installed — validate the error case per the new behavior.
+		// The remediation hint must be in the error itself: loop.go only ever
+		// surfaces execErr.Error() to the agent, so the message return value
+		// (out) is discarded in production and can't carry it.
 		if !strings.Contains(err.Error(), "checkov") {
 			t.Errorf("error should mention checkov, got: %v", err)
 		}
-		// Even with an error, the output should explain what happened
-		if !strings.Contains(out, "skipping security scan") {
-			t.Errorf("expected output to explain the skip, got: %q", out)
+		if !strings.Contains(err.Error(), "pip install checkov") {
+			t.Errorf("expected the error to include the install hint, got: %v", err)
 		}
 	} else {
 		// Checkov installed — just validate we got some output
