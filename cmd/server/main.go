@@ -69,13 +69,13 @@ func main() {
 	// Mark any tasks left in running/queued/waiting_for_input state as failed
 	// (stale from a prior run) — but only when that's actually true. See
 	// shouldMarkStaleTasksFailed's doc comment for why this must be skipped
-	// under queue_driver=nats.
+	// under queue_driver=nats or queue_driver=postgres.
 	if shouldMarkStaleTasksFailed(queueDriver) {
 		if err := store.MarkStaleTasksFailed(context.Background()); err != nil {
 			logger.Error("failed to cleanup stale tasks", "err", err)
 		}
 	} else {
-		logger.Info("skipping stale-task cleanup: queue_driver=nats is durable across restarts, NATS redelivery handles recovery of any task an owning pod died mid-execution", "queue_driver", queueDriver)
+		logger.Info("skipping stale-task cleanup: queue is durable across restarts, lease/redelivery handles recovery of any task an owning pod died mid-execution", "queue_driver", queueDriver)
 	}
 
 	// Bootstrap admin user from env var on first run.
@@ -153,6 +153,25 @@ func main() {
 		}
 		defer nc.Close()
 		relayConn = nc
+	case "postgres":
+		for _, name := range queueNames {
+			dsn := cfg.Server.PostgresQueueDSN
+			if dsn == "" {
+				dsn = os.Getenv("DB_URL") // falls back to the same DSN the main Store uses
+			}
+			pq, err := queue.NewPostgresQueue(
+				dsn, name,
+				time.Duration(cfg.Server.PostgresQueueLeaseTTL)*time.Second,
+				cfg.Server.PostgresQueueMaxAttempts,
+			)
+			if err != nil {
+				logger.Error("failed to create postgres queue", "queue", name, "err", err)
+				os.Exit(1)
+			}
+			defer pq.Close()
+			queues[name] = pq
+		}
+		logger.Info("queue connected", "driver", "postgres", "queues", strings.Join(queueNames, ", "))
 	default:
 		bufSize := cfg.Server.QueueBuffer
 		if bufSize <= 0 {
@@ -270,9 +289,11 @@ func main() {
 // startup stale-task cleanup (store.MarkStaleTasksFailed) for the given
 // resolved queue driver value.
 //
-// It must be false for "nats": that queue is durable across process
-// restarts, and NATS's own redelivery (AckWait/MaxDeliver, see
-// internal/queue/nats.go) plus the isTerminalStatus idempotency check in
+// It must be false for "nats" and "postgres": both queues are durable across
+// process restarts, and each driver's own redelivery/lease-reclaim mechanism
+// (NATS's AckWait/MaxDeliver in internal/queue/nats.go; Postgres's
+// lease_ttl-based reclaim on the next Pop in internal/queue/postgres.go)
+// plus the isTerminalStatus idempotency check in
 // internal/server/task_runner.go already recover a task whose owning pod
 // died mid-execution. Running the cleanup unconditionally there would mark
 // OTHER pods' genuinely in-flight tasks as failed on any single pod's
@@ -287,7 +308,7 @@ func main() {
 // too, so any row still marked running/queued/waiting_for_input really is
 // orphaned and safe — indeed necessary — to mark failed.
 func shouldMarkStaleTasksFailed(queueDriver string) bool {
-	return queueDriver != "nats"
+	return queueDriver != "nats" && queueDriver != "postgres"
 }
 
 // staleTaskReconcileInterval controls how often runStaleTaskReconciler calls

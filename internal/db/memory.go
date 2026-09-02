@@ -397,3 +397,11 @@ func (s *memStore) GetRunEventsSince(_ context.Context, taskID string, sinceSeq 
 	}
 	return out, nil
 }
+
+// --- Dead letter queue ---
+
+func (s *memStore) ListDeadLetterTasks(_ context.Context, _ string) ([]DeadLetterTask, error) {
+	// task_queue only exists under queue_driver=postgres; the in-memory
+	// store (unit tests only) has nothing to report here.
+	return nil, nil
+}

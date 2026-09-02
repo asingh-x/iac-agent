@@ -503,6 +503,33 @@ func (s *PostgresStore) GetRunEventsSince(ctx context.Context, taskID string, si
 	return events, err
 }
 
+// --- Dead letter queue ---
+
+func (s *PostgresStore) ListDeadLetterTasks(ctx context.Context, queueName string) ([]DeadLetterTask, error) {
+	var out []DeadLetterTask
+	err := s.withRetry(ctx, func() error {
+		out = nil // reset in case a prior attempt partially iterated before failing
+		rows, err := s.db.QueryContext(ctx,
+			`SELECT id, queue_name, COALESCE(dead_letter_reason, ''), attempt_count, updated_at
+			 FROM task_queue WHERE queue_name = $1 AND status = 'dead_letter' ORDER BY updated_at DESC`,
+			queueName,
+		)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var t DeadLetterTask
+			if err := rows.Scan(&t.ID, &t.QueueName, &t.Reason, &t.AttemptCount, &t.UpdatedAt); err != nil {
+				return err
+			}
+			out = append(out, t)
+		}
+		return rows.Err()
+	})
+	return out, err
+}
+
 // --- helpers ---
 
 // scanner is satisfied by *sql.Row and *sql.Rows.
