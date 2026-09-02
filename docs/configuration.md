@@ -94,10 +94,42 @@ make infra-clean
 | Variable | Default | Description |
 |---|---|---|
 | `DB_URL` | — | **Required.** Postgres DSN: `postgres://user:pass@host:5432/db?sslmode=disable` |
-| `QUEUE_DRIVER` | `memory` | `memory` or `nats` |
-| `NATS_URL` | `nats://127.0.0.1:4222` | NATS server URL |
+| `QUEUE_DRIVER` | `memory` | `memory`, `nats`, or `postgres` |
+| `NATS_URL` | `nats://127.0.0.1:4222` | NATS server URL (used when `QUEUE_DRIVER=nats`) |
 | `QUEUE_NAMES` | `default` | Comma-separated named queues — each gets its own worker goroutine (e.g. `default,security`) |
 | `TF_AGENT_ADMIN_TOKEN` | — | Bootstrap admin token on first run |
+
+### Queue driver selection
+
+Three queue drivers are available:
+
+- **`memory`** (default): In-memory queue; tasks are lost on restart. Only suitable for development and single-instance deployments.
+- **`nats`**: Durable, clustered NATS JetStream queue. Requires a separate NATS infrastructure (see `NATS_URL`).
+- **`postgres`**: Durable leased task queue backed by Postgres. No separate infrastructure needed — Postgres, which you already require for state storage, also owns the queue. Task leases, retries with backoff, and dead-letter tracking are all handled via the `task_queue` table. **Pick this for on-premises deployments** where you want durable execution without adding a new service dependency. **Caveat:** unlike `nats`, this driver has no cross-pod control plane relay wired up — the queue itself is safely durable and shared across replicas, but answer/permission/cancel requests AND live SSE output streaming for a running task will fail or hang if load-balanced to a pod that doesn't own it. Fine for a single replica; for multiple replicas either route control-plane requests to the owning pod (sticky routing) or use `queue_driver = "nats"` instead.
+
+### Postgres queue configuration (config.toml only)
+
+When `queue_driver = "postgres"`, the following `[server]` section fields control the queue behaviour. **Note: these are TOML fields only, not environment variables.**
+
+```toml
+[server]
+queue_driver = "postgres"
+
+# Optional: Postgres DSN for the queue.
+# If unset, defaults to the main DB_URL environment variable. task_queue
+# lives in the same database as everything else (created by the same
+# migration path), so this is normally the same DSN as the main store's,
+# not a separate database.
+postgres_queue_dsn = "postgres://user:pass@host:5432/db?sslmode=disable"
+
+# How long (in seconds) a task lease is valid before expiry and requeue.
+# Default: 300 (5 minutes)
+postgres_queue_lease_ttl = 300
+
+# Maximum number of retry attempts before a task moves to dead-letter.
+# Default: 5
+postgres_queue_max_attempts = 5
+```
 
 ### Tests
 

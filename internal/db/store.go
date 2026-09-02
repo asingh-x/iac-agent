@@ -87,6 +87,18 @@ type RunEvent struct {
 	CreatedAt time.Time
 }
 
+// DeadLetterTask is a task_queue row that exhausted its max delivery
+// attempts and was moved to the dead_letter status (see internal/queue's
+// PostgresQueue.Nak). Only populated under queue_driver=postgres — see the
+// memStore implementation of ListDeadLetterTasks for why.
+type DeadLetterTask struct {
+	ID           string
+	QueueName    string
+	Reason       string
+	AttemptCount int
+	UpdatedAt    time.Time
+}
+
 // Store is the persistence interface. Swap implementations without touching callers.
 type Store interface {
 	// Users
@@ -145,6 +157,12 @@ type Store interface {
 	// Run events — ordered, persistent event log per task for SSE replay.
 	AppendRunEvent(ctx context.Context, taskID, eventType string, payload json.RawMessage) (seq int64, err error)
 	GetRunEventsSince(ctx context.Context, taskID string, sinceSeq int64) ([]RunEvent, error)
+
+	// ListDeadLetterTasks returns the task_queue rows for queueName that
+	// exhausted their max delivery attempts (status = 'dead_letter'), newest
+	// first. Only meaningful under queue_driver=postgres — the in-memory
+	// store has no task_queue table and always returns an empty result.
+	ListDeadLetterTasks(ctx context.Context, queueName string) ([]DeadLetterTask, error)
 
 	// Ping verifies the database connection is alive.
 	Ping(ctx context.Context) error

@@ -34,6 +34,30 @@ per_user_concurrency = 3
 # Default: 500
 queue_buffer = 500
 
+# Task queue backend. Options: "memory" (default), "nats", "postgres".
+# - "memory": in-memory queue, tasks lost on restart
+# - "nats": durable, distributed queue (requires separate NATS infrastructure)
+# - "postgres": durable queue backed by the main Postgres database (no additional service needed)
+# Default: "memory"
+# queue_driver = "postgres"
+
+# Postgres queue DSN (only used when queue_driver = "postgres").
+# If unset, defaults to the DB_URL environment variable. task_queue lives in
+# the same database as everything else (created by the same migration
+# path), so this should normally be the same DSN as postgres_url above, not
+# a separate database.
+# postgres_queue_dsn = "postgres://tfagent:pass@localhost:5432/tfagent?sslmode=disable"
+
+# Postgres queue lease TTL in seconds (only used when queue_driver = "postgres").
+# How long a task lease is valid before expiry and requeue.
+# Default: 300 (5 minutes)
+# postgres_queue_lease_ttl = 300
+
+# Postgres queue max retry attempts (only used when queue_driver = "postgres").
+# Maximum number of attempts before a task moves to dead-letter.
+# Default: 5
+# postgres_queue_max_attempts = 5
+
 # terraform/tflint/checkov (invoked by the Validate and SecurityScan skills)
 # always run inside a locked-down sandbox container — this is mandatory, not
 # configurable. See docs/sandbox.md. The default "docker" backend requires a
