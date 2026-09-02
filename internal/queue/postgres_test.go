@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -197,7 +198,7 @@ func TestPostgresDelivery_Extend_RenewsLease(t *testing.T) {
 	}
 }
 
-func TestPostgresDelivery_Ack_MarksDone(t *testing.T) {
+func TestPostgresDelivery_Ack_DeletesRow(t *testing.T) {
 	url := requireDBURL(t)
 	q, err := NewPostgresQueue(url, "pgqtest-ack", 5*time.Minute, 5)
 	if err != nil {
@@ -221,12 +222,14 @@ func TestPostgresDelivery_Ack_MarksDone(t *testing.T) {
 		t.Fatalf("Ack: %v", err)
 	}
 
+	// Ack deletes the row outright (mirroring NATS's delete-on-ack behavior
+	// and bounding how long any decrypted credentials in the payload can
+	// linger) rather than marking status = 'done', so nothing should be
+	// left to find.
 	var status string
-	if err := q.db.QueryRow(`SELECT status FROM task_queue WHERE id = $1`, "ack-1").Scan(&status); err != nil {
-		t.Fatalf("query status: %v", err)
-	}
-	if status != "done" {
-		t.Errorf("status = %q, want %q", status, "done")
+	err = q.db.QueryRow(`SELECT status FROM task_queue WHERE id = $1`, "ack-1").Scan(&status)
+	if err != sql.ErrNoRows {
+		t.Fatalf("query status after Ack: got err=%v, status=%q — want sql.ErrNoRows (row should be deleted)", err, status)
 	}
 }
 
@@ -277,15 +280,14 @@ func TestPostgresDelivery_Ack_StaleFencingToken_NoOp(t *testing.T) {
 		t.Fatalf("status = %q, want %q — the zombie's stale Ack must not have marked this done out from under the reclaiming worker", status, "leased")
 	}
 
-	// The genuine holder's Ack must still work.
+	// The genuine holder's Ack must still work — and, per Ack's
+	// delete-on-ack behavior, removes the row entirely.
 	if err := freshDelivery.Ack(); err != nil {
 		t.Fatalf("fresh Ack: %v", err)
 	}
-	if err := q.db.QueryRow(`SELECT status FROM task_queue WHERE id = $1`, "fence-1").Scan(&status); err != nil {
-		t.Fatalf("query status: %v", err)
-	}
-	if status != "done" {
-		t.Errorf("status = %q, want %q after the genuine holder's Ack", status, "done")
+	err = q.db.QueryRow(`SELECT status FROM task_queue WHERE id = $1`, "fence-1").Scan(&status)
+	if err != sql.ErrNoRows {
+		t.Errorf("query status after genuine Ack: got err=%v, status=%q — want sql.ErrNoRows (row should be deleted)", err, status)
 	}
 }
 
@@ -337,7 +339,16 @@ func TestPostgresDelivery_Nak_DeadLettersAfterMaxAttempts(t *testing.T) {
 	// Clean up any previous test data so this test is re-runnable.
 	_, _ = q.db.ExecContext(context.Background(), `DELETE FROM task_queue WHERE queue_name = $1`, "pgqtest-deadletter")
 
-	if err := q.Push(context.Background(), Item{TaskID: "dl-1"}); err != nil {
+	// Populate the credential fields so this test can also verify they're
+	// stripped from the payload once the row is dead-lettered — dead_letter
+	// rows are retained by design (unlike Ack's delete-on-ack) since an
+	// operator inspects them, so decrypted PATs must not still be sitting
+	// in the payload column at that point.
+	if err := q.Push(context.Background(), Item{
+		TaskID:         "dl-1",
+		GitHubToken:    "ghp_supersecret",
+		AtlassianToken: "atlassian-supersecret",
+	}); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
 
@@ -355,7 +366,8 @@ func TestPostgresDelivery_Nak_DeadLettersAfterMaxAttempts(t *testing.T) {
 
 	var status string
 	var reason sql.NullString
-	if err := q.db.QueryRow(`SELECT status, dead_letter_reason FROM task_queue WHERE id = $1`, "dl-1").Scan(&status, &reason); err != nil {
+	var payload []byte
+	if err := q.db.QueryRow(`SELECT status, dead_letter_reason, payload FROM task_queue WHERE id = $1`, "dl-1").Scan(&status, &reason, &payload); err != nil {
 		t.Fatalf("query: %v", err)
 	}
 	if status != "dead_letter" {
@@ -363,6 +375,13 @@ func TestPostgresDelivery_Nak_DeadLettersAfterMaxAttempts(t *testing.T) {
 	}
 	if !reason.Valid || reason.String == "" {
 		t.Error("expected a non-empty dead_letter_reason")
+	}
+	payloadStr := string(payload)
+	if strings.Contains(payloadStr, "ghp_supersecret") || strings.Contains(payloadStr, "GitHubToken") {
+		t.Errorf("dead-lettered payload still contains GitHubToken: %s", payloadStr)
+	}
+	if strings.Contains(payloadStr, "atlassian-supersecret") || strings.Contains(payloadStr, "AtlassianToken") {
+		t.Errorf("dead-lettered payload still contains AtlassianToken: %s", payloadStr)
 	}
 }
 
@@ -415,14 +434,13 @@ func TestPostgresDelivery_Nak_StaleFencingToken_NoOp(t *testing.T) {
 	}
 
 	// The genuine holder's Ack must still work, proving the row is still
-	// intact and owned by the reclaiming worker's lease.
+	// intact and owned by the reclaiming worker's lease — and, per Ack's
+	// delete-on-ack behavior, removes the row entirely.
 	if err := freshDelivery.Ack(); err != nil {
 		t.Fatalf("fresh Ack: %v", err)
 	}
-	if err := q.db.QueryRow(`SELECT status FROM task_queue WHERE id = $1`, "nak-fence-1").Scan(&status); err != nil {
-		t.Fatalf("query status: %v", err)
-	}
-	if status != "done" {
-		t.Errorf("status = %q, want %q after the genuine holder's Ack", status, "done")
+	err = q.db.QueryRow(`SELECT status FROM task_queue WHERE id = $1`, "nak-fence-1").Scan(&status)
+	if err != sql.ErrNoRows {
+		t.Errorf("query status after genuine Ack: got err=%v, status=%q — want sql.ErrNoRows (row should be deleted)", err, status)
 	}
 }
