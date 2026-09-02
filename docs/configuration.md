@@ -76,9 +76,6 @@ make infra-clean
 | `DB_URL` | — | **Required.** Postgres DSN: `postgres://user:pass@host:5432/db?sslmode=disable` |
 | `QUEUE_DRIVER` | `memory` | `memory`, `nats`, or `postgres` |
 | `NATS_URL` | `nats://127.0.0.1:4222` | NATS server URL (used when `QUEUE_DRIVER=nats`) |
-| `POSTGRES_QUEUE_DSN` | — | Postgres DSN for the queue (used when `QUEUE_DRIVER=postgres`); defaults to `DB_URL` if unset |
-| `POSTGRES_QUEUE_LEASE_TTL` | `30s` | How long a task lease is valid before expiry and requeue (used when `QUEUE_DRIVER=postgres`) |
-| `POSTGRES_QUEUE_MAX_ATTEMPTS` | `3` | Max retry attempts before moving to dead-letter (used when `QUEUE_DRIVER=postgres`) |
 | `QUEUE_NAMES` | `default` | Comma-separated named queues — each gets its own worker goroutine (e.g. `default,security`) |
 | `TF_AGENT_ADMIN_TOKEN` | — | Bootstrap admin token on first run |
 
@@ -89,6 +86,27 @@ Three queue drivers are available:
 - **`memory`** (default): In-memory queue; tasks are lost on restart. Only suitable for development and single-instance deployments.
 - **`nats`**: Durable, clustered NATS JetStream queue. Requires a separate NATS infrastructure (see `NATS_URL`).
 - **`postgres`**: Durable leased task queue backed by Postgres. No separate infrastructure needed — Postgres, which you already require for state storage, also owns the queue. Task leases, retries with backoff, and dead-letter tracking are all handled via the `task_queue` table. **Pick this for on-premises deployments** where you want durable execution without adding a new service dependency.
+
+### Postgres queue configuration (config.toml only)
+
+When `queue_driver = "postgres"`, the following `[server]` section fields control the queue behaviour. **Note: these are TOML fields only, not environment variables.**
+
+```toml
+[server]
+queue_driver = "postgres"
+
+# Optional: Postgres DSN for the queue.
+# If unset, defaults to the main DB_URL environment variable.
+postgres_queue_dsn = "postgres://user:pass@host:5432/tfagent-queue?sslmode=disable"
+
+# How long (in seconds) a task lease is valid before expiry and requeue.
+# Default: 300 (5 minutes)
+postgres_queue_lease_ttl = 300
+
+# Maximum number of retry attempts before a task moves to dead-letter.
+# Default: 5
+postgres_queue_max_attempts = 5
+```
 
 ### Tests
 
