@@ -246,27 +246,85 @@ func (r *Runner) SendPermissionResponse(taskID string, allow bool) error {
 	return nil
 }
 
+// pauseGate depth-counts concurrent "parked waiting for human input" pauses
+// on a single task, so the underlying LLM-concurrency semaphore(s) are
+// released exactly once when the first such pause begins and reacquired
+// exactly once when the last one ends — no matter how many pauses on this
+// task are open at once.
+//
+// This exists because a single LLM turn can batch an ask_user tool call
+// together with another tool call that needs permission (e.g. bash), and
+// internal/agent/loop.go's executeTools fans multiple tool calls from one
+// turn into parallel goroutines. Both the AskUser callback (run from the
+// ask_user tool's own fanned-out goroutine) and awaitPermission (run
+// synchronously from Runner.run's own event-loop goroutine) can therefore be
+// "open" concurrently for the SAME task, even though that task only ever
+// acquired one token from sem and one from userSem at the top of run(). A
+// naive release/reacquire at each pause site independently would
+// double-release a token this task doesn't have a second copy of: either
+// silently stealing another task's slot elsewhere on the pod (breaking the
+// concurrency-limit invariant), or — if nothing else is available to steal —
+// blocking forever on a bare channel receive with no cancellation escape,
+// hanging Runner.run's event loop for this task unrecoverably. pauseGate
+// makes overlapping pauses on one task share a single release/reacquire
+// pair instead, which is safe for any number of concurrent pauses (2, 3, or
+// N): the first one in does the real release, the last one out does the
+// real reacquire, and everything in between is a no-op depth change.
+type pauseGate struct {
+	sem     chan struct{}
+	userSem chan struct{} // nil if PerUserConcurrency limiting is disabled
+
+	mu    sync.Mutex
+	depth int
+}
+
+// release drops this task's concurrency slot(s) back to the shared pool the
+// first time it's called while no other pause on this task is open ("first
+// one in"); an overlapping call just increments the depth counter.
+func (g *pauseGate) release() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.depth++
+	if g.depth == 1 {
+		<-g.sem
+		if g.userSem != nil {
+			<-g.userSem
+		}
+	}
+}
+
+// reacquire is release's counterpart: it only takes the slot(s) back once
+// the last overlapping pause on this task ends ("last one out").
+func (g *pauseGate) reacquire() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.depth--
+	if g.depth == 0 {
+		g.sem <- struct{}{}
+		if g.userSem != nil {
+			g.userSem <- struct{}{}
+		}
+	}
+}
+
 // awaitPermission pauses the task on a "confirm this tool call" prompt: it
 // publishes a permission_request SSE event and blocks until the user
 // responds via SendPermissionResponse, the wait times out (denies, since
 // timing out on a destructive-tool confirmation should not silently allow
 // it), or the task's context is cancelled (denies).
-func (r *Runner) awaitPermission(ctx context.Context, taskID string, req *agent.PermissionRequest, waitTimeoutSeconds int, ch <-chan bool, waitingForInput *int32, sem chan struct{}, userSem chan struct{}) bool {
+func (r *Runner) awaitPermission(ctx context.Context, taskID string, req *agent.PermissionRequest, waitTimeoutSeconds int, ch <-chan bool, waitingForInput *int32, release func(), reacquire func()) bool {
 	atomic.StoreInt32(waitingForInput, 1)
 	defer atomic.StoreInt32(waitingForInput, 0)
 
 	// Release concurrency slots while parked on an approve/deny prompt, for
-	// the same reason as the AskUser callback in Runner.run.
-	<-sem
-	if userSem != nil {
-		<-userSem
-	}
-	defer func() {
-		sem <- struct{}{}
-		if userSem != nil {
-			userSem <- struct{}{}
-		}
-	}()
+	// the same reason as the AskUser callback in Runner.run. release/
+	// reacquire are Runner.run's pauseGate.release/pauseGate.reacquire
+	// methods, which depth-count concurrent pauses on the same task so this
+	// can safely overlap with a concurrent AskUser pause (see pauseGate's
+	// doc comment) without double-releasing a semaphore slot this task only
+	// acquired once.
+	release()
+	defer reacquire()
 
 	preview := previewToolInput(req.Input)
 
@@ -600,6 +658,15 @@ func (r *Runner) run(ctx context.Context, item queue.Item, delivery queue.Delive
 	}
 	defer func() { <-r.sem }()
 
+	// pg depth-counts concurrent pauses on this task so overlapping pauses
+	// (e.g. an ask_user tool call batched with another tool call needing
+	// permission in the same LLM turn — internal/agent/loop.go's
+	// executeTools fans these out into parallel goroutines) share one
+	// release/reacquire of the underlying semaphore instead of each
+	// independently releasing/reacquiring, which would double-release a
+	// token this task only acquired once. See pauseGate's doc comment.
+	pg := &pauseGate{sem: r.sem, userSem: userSem}
+
 	// Create a per-task cancellable context so individual tasks can be stopped.
 	taskCtxCancel, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -735,17 +802,15 @@ func (r *Runner) run(ctx context.Context, item queue.Item, delivery queue.Delive
 
 		// Release concurrency slots while parked on a human answer — an
 		// unanswered question (up to WaitForInputTimeout, 7 days by default)
-		// must not hold capacity that could serve other tasks.
-		<-r.sem
-		if userSem != nil {
-			<-userSem
-		}
-		defer func() {
-			r.sem <- struct{}{}
-			if userSem != nil {
-				userSem <- struct{}{}
-			}
-		}()
+		// must not hold capacity that could serve other tasks. Goes through
+		// pg (a *pauseGate), not a direct channel release, because this
+		// callback can run concurrently with awaitPermission for the SAME
+		// task: a single LLM turn can batch an ask_user call together with
+		// another tool call that needs permission, and executeTools fans
+		// those out into parallel goroutines (internal/agent/loop.go). See
+		// pauseGate's doc comment.
+		pg.release()
+		defer pg.reacquire()
 
 		if err := r.store.UpdateTaskStatus(ctx, item.TaskID, "waiting_for_input"); err != nil {
 			r.logger.Error("failed to update task status", "task_id", item.TaskID, "status", "waiting_for_input", "err", err)
@@ -826,7 +891,7 @@ func (r *Runner) run(ctx context.Context, item queue.Item, delivery queue.Delive
 
 		case agent.TurnEventPermission:
 			if ev.PermissionRequest != nil {
-				ev.PermissionRequest.ResponseCh <- r.awaitPermission(ctx, item.TaskID, ev.PermissionRequest, waitTimeout, permissionCh, &waitingForInput, r.sem, userSem)
+				ev.PermissionRequest.ResponseCh <- r.awaitPermission(ctx, item.TaskID, ev.PermissionRequest, waitTimeout, permissionCh, &waitingForInput, pg.release, pg.reacquire)
 			}
 
 		case agent.TurnEventError:
