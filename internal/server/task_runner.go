@@ -251,9 +251,22 @@ func (r *Runner) SendPermissionResponse(taskID string, allow bool) error {
 // responds via SendPermissionResponse, the wait times out (denies, since
 // timing out on a destructive-tool confirmation should not silently allow
 // it), or the task's context is cancelled (denies).
-func (r *Runner) awaitPermission(ctx context.Context, taskID string, req *agent.PermissionRequest, waitTimeoutSeconds int, ch <-chan bool, waitingForInput *int32) bool {
+func (r *Runner) awaitPermission(ctx context.Context, taskID string, req *agent.PermissionRequest, waitTimeoutSeconds int, ch <-chan bool, waitingForInput *int32, sem chan struct{}, userSem chan struct{}) bool {
 	atomic.StoreInt32(waitingForInput, 1)
 	defer atomic.StoreInt32(waitingForInput, 0)
+
+	// Release concurrency slots while parked on an approve/deny prompt, for
+	// the same reason as the AskUser callback in Runner.run.
+	<-sem
+	if userSem != nil {
+		<-userSem
+	}
+	defer func() {
+		sem <- struct{}{}
+		if userSem != nil {
+			userSem <- struct{}{}
+		}
+	}()
 
 	preview := previewToolInput(req.Input)
 
@@ -544,12 +557,13 @@ func (r *Runner) run(ctx context.Context, item queue.Item, delivery queue.Delive
 	// since the per-task context.CancelFunc isn't registered in r.cancels
 	// until after this section, Shutdown's grace-period force-cancel can't
 	// even reach a task stuck here to unblock it.
+	var userSem chan struct{} // nil if PerUserConcurrency limiting is disabled
 	if limit := r.cfg.Server.PerUserConcurrency; limit > 0 {
 		r.userSemMu.Lock()
 		if _, ok := r.userSems[item.UserID]; !ok {
 			r.userSems[item.UserID] = make(chan struct{}, limit)
 		}
-		userSem := r.userSems[item.UserID]
+		userSem = r.userSems[item.UserID]
 		// Stamp "last used" in the same critical section as the lookup/
 		// create above — not after the select below acquires a slot — so
 		// sweepIdleUserSemaphores (also gated on r.userSemMu) can never see
@@ -719,6 +733,20 @@ func (r *Runner) run(ctx context.Context, item queue.Item, delivery queue.Delive
 		atomic.StoreInt32(&waitingForInput, 1)
 		defer atomic.StoreInt32(&waitingForInput, 0)
 
+		// Release concurrency slots while parked on a human answer — an
+		// unanswered question (up to WaitForInputTimeout, 7 days by default)
+		// must not hold capacity that could serve other tasks.
+		<-r.sem
+		if userSem != nil {
+			<-userSem
+		}
+		defer func() {
+			r.sem <- struct{}{}
+			if userSem != nil {
+				userSem <- struct{}{}
+			}
+		}()
+
 		if err := r.store.UpdateTaskStatus(ctx, item.TaskID, "waiting_for_input"); err != nil {
 			r.logger.Error("failed to update task status", "task_id", item.TaskID, "status", "waiting_for_input", "err", err)
 		}
@@ -798,7 +826,7 @@ func (r *Runner) run(ctx context.Context, item queue.Item, delivery queue.Delive
 
 		case agent.TurnEventPermission:
 			if ev.PermissionRequest != nil {
-				ev.PermissionRequest.ResponseCh <- r.awaitPermission(ctx, item.TaskID, ev.PermissionRequest, waitTimeout, permissionCh, &waitingForInput)
+				ev.PermissionRequest.ResponseCh <- r.awaitPermission(ctx, item.TaskID, ev.PermissionRequest, waitTimeout, permissionCh, &waitingForInput, r.sem, userSem)
 			}
 
 		case agent.TurnEventError:
