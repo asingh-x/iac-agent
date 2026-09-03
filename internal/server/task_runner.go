@@ -829,11 +829,15 @@ func (r *Runner) run(ctx context.Context, item queue.Item, delivery queue.Delive
 		if githubToken == "" && us.GitHubToken != "" {
 			if dec, err := Decrypt(us.GitHubToken); err == nil {
 				githubToken = dec
+			} else {
+				r.logger.Warn("failed to decrypt stored github_token", "task_id", item.TaskID, "user_id", item.UserID, "err", err)
 			}
 		}
 		if atlassianToken == "" && us.AtlassianToken != "" {
 			if dec, err := Decrypt(us.AtlassianToken); err == nil {
 				atlassianToken = dec
+			} else {
+				r.logger.Warn("failed to decrypt stored atlassian_token", "task_id", item.TaskID, "user_id", item.UserID, "err", err)
 			}
 		}
 		if atlassianDomain == "" {
@@ -1141,35 +1145,32 @@ func (r *Runner) wireAgent(ctx context.Context, item queue.Item) (*agent.Agent, 
 	toolReg.Register(&tools.AskUserTool{})
 	toolReg.Register(tools.NewAgentTool(r.buildSubAgentRunner(cwd)))
 
-	// sandboxExecutor is nil (host-exec fallback) unless sandbox_enabled is
-	// set — see internal/sandbox and docs/sandbox.md. Defaulting to nil keeps
-	// ValidateSkill/SecurityScanSkill behavior byte-for-byte unchanged for
-	// anyone not opting into sandboxing. sandbox_backend selects which
-	// Executor implementation backs it; anything other than "kubernetes"
-	// (including empty, the pre-existing default) keeps the original
-	// Docker-only behavior.
+	// sandboxExecutor is always constructed: ValidateSkill/SecurityScanSkill
+	// require a real sandbox.Executor and no longer fall back to running
+	// terraform/tflint/checkov directly on the host — see internal/sandbox
+	// and docs/sandbox.md. sandbox_backend selects which Executor
+	// implementation backs it; anything other than "kubernetes" (including
+	// empty, the default) uses the Docker backend.
 	var sandboxExecutor sandbox.Executor
-	if r.cfg.Server.SandboxEnabled {
-		switch r.cfg.Server.SandboxBackend {
-		case "kubernetes":
-			k8sExecutor, err := sandbox.NewK8sJobExecutor(
-				r.cfg.Server.SandboxKubeconfigPath,
-				r.cfg.Server.SandboxKubeNamespace,
-				r.cfg.Server.SandboxImage,
-				r.cfg.Server.SandboxKubeMemory,
-				r.cfg.Server.SandboxKubeCPUs,
-			)
-			if err != nil {
-				return nil, fmt.Errorf("sandbox: build kubernetes executor: %w", err)
-			}
-			sandboxExecutor = k8sExecutor
-		default:
-			sandboxExecutor = sandbox.NewDockerExecutor(
-				r.cfg.Server.SandboxImage,
-				r.cfg.Server.SandboxMemory,
-				r.cfg.Server.SandboxCPUs,
-			)
+	switch r.cfg.Server.SandboxBackend {
+	case "kubernetes":
+		k8sExecutor, err := sandbox.NewK8sJobExecutor(
+			r.cfg.Server.SandboxKubeconfigPath,
+			r.cfg.Server.SandboxKubeNamespace,
+			r.cfg.Server.SandboxImage,
+			r.cfg.Server.SandboxKubeMemory,
+			r.cfg.Server.SandboxKubeCPUs,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("sandbox: build kubernetes executor: %w", err)
 		}
+		sandboxExecutor = k8sExecutor
+	default:
+		sandboxExecutor = sandbox.NewDockerExecutor(
+			r.cfg.Server.SandboxImage,
+			r.cfg.Server.SandboxMemory,
+			r.cfg.Server.SandboxCPUs,
+		)
 	}
 
 	skillReg := skills.NewRegistry()

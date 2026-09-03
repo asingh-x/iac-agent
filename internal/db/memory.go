@@ -31,7 +31,7 @@ type memStore struct {
 	settings  map[string]*UserSettings
 	audit     []*AuditEvent
 	repoIndex map[string]*RepoIndexEntry // "repoID\x00commitSHA" → entry
-	runEvents map[string][]RunEvent       // taskID → events
+	runEvents map[string][]RunEvent      // taskID → events
 }
 
 func repoIndexKey(repoID, commitSHA string) string { return repoID + "\x00" + commitSHA }
@@ -396,4 +396,12 @@ func (s *memStore) GetRunEventsSince(_ context.Context, taskID string, sinceSeq 
 		}
 	}
 	return out, nil
+}
+
+// --- Dead letter queue ---
+
+func (s *memStore) ListDeadLetterTasks(_ context.Context, _ string) ([]DeadLetterTask, error) {
+	// task_queue only exists under queue_driver=postgres; the in-memory
+	// store (unit tests only) has nothing to report here.
+	return nil, nil
 }

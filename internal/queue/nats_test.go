@@ -189,3 +189,51 @@ func TestNATSQueue_CredentialsNotPersisted(t *testing.T) {
 		t.Errorf("got GitHubToken %q, want %q", got.GitHubToken, item.GitHubToken)
 	}
 }
+
+// TestNATSQueue_Len_IsPerQueueNotWholeStream proves Len() reports this
+// queue's own pending count, not the whole shared TF_AGENT stream's total
+// — the bug this test guards against: two named queues used to report the
+// identical (wrong, too-high) combined count from either one.
+func TestNATSQueue_Len_IsPerQueueNotWholeStream(t *testing.T) {
+	url := os.Getenv("NATS_URL")
+	if url == "" {
+		t.Skip("NATS_URL not set — skipping NATS integration tests")
+	}
+
+	// Generate unique queue names with nanosecond timestamp, not just the
+	// sanitized test name, to avoid NATS consumer/stream state leaking from
+	// previous test runs (see chaos_test.go's chaosQueueName for the same pattern
+	// and rationale). Each test run creates fresh consumers with unique names.
+	nameA := fmt.Sprintf("lentest-a-%d", time.Now().UnixNano())
+	nameB := fmt.Sprintf("lentest-b-%d", time.Now().UnixNano())
+
+	qA, err := queue.NewNATSQueue(url, nameA, queue.DefaultNATSMaxMsgs)
+	if err != nil {
+		t.Fatalf("NewNATSQueue a: %v", err)
+	}
+	t.Cleanup(func() { _ = qA.Close() })
+
+	qB, err := queue.NewNATSQueue(url, nameB, queue.DefaultNATSMaxMsgs)
+	if err != nil {
+		t.Fatalf("NewNATSQueue b: %v", err)
+	}
+	t.Cleanup(func() { _ = qB.Close() })
+
+	ctx := context.Background()
+	if err := qA.Push(ctx, queue.Item{TaskID: "a1"}); err != nil {
+		t.Fatalf("push a1: %v", err)
+	}
+	if err := qA.Push(ctx, queue.Item{TaskID: "a2"}); err != nil {
+		t.Fatalf("push a2: %v", err)
+	}
+	if err := qB.Push(ctx, queue.Item{TaskID: "b1"}); err != nil {
+		t.Fatalf("push b1: %v", err)
+	}
+
+	if got := qA.Len(); got != 2 {
+		t.Errorf("qA.Len() = %d, want 2 (its own 2 pushed items, not the shared stream's 3)", got)
+	}
+	if got := qB.Len(); got != 1 {
+		t.Errorf("qB.Len() = %d, want 1 (its own 1 pushed item, not the shared stream's 3)", got)
+	}
+}

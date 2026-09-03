@@ -1,0 +1,465 @@
+openapi: 3.0.3
+info:
+  title: iac-agent API
+  description: >
+    Autonomous Terraform agent API — submit a task (prompt or Jira ticket),
+    stream its progress live, and answer/approve mid-task pauses. All
+    endpoints require a bearer token except where noted.
+  version: "1.0"
+  license:
+    name: MIT
+servers:
+  - url: http://localhost:8080
+    description: Local dev server
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: tasks
+    description: Submit and monitor agent tasks
+  - name: settings
+    description: Per-user settings (GitHub/Atlassian tokens)
+  - name: admin
+    description: User management (admin role required)
+  - name: ops
+    description: Health and metrics endpoints (no auth)
+
+paths:
+  /v1/me:
+    get:
+      tags: [tasks]
+      summary: Current user info
+      responses:
+        "200":
+          description: The authenticated user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+
+  /v1/tasks:
+    post:
+      tags: [tasks]
+      summary: Submit a task
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskSubmission"
+      responses:
+        "201":
+          description: Task created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id:
+                    type: string
+    get:
+      tags: [tasks]
+      summary: List recent tasks
+      responses:
+        "200":
+          description: Recent tasks for the authenticated user
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Task"
+
+  /v1/tasks/{id}:
+    get:
+      tags: [tasks]
+      summary: Get task details
+      parameters:
+        - $ref: "#/components/parameters/TaskID"
+      responses:
+        "200":
+          description: Task detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "404":
+          description: Task not found
+
+  /v1/tasks/{id}/stream:
+    get:
+      tags: [tasks]
+      summary: SSE stream for live task output
+      description: >
+        Server-Sent Events stream. Supports reconnect replay: send a
+        `Last-Event-ID` header with the last `id:` value received, and
+        every event persisted since will be replayed before live events
+        resume.
+      parameters:
+        - $ref: "#/components/parameters/TaskID"
+        - name: Last-Event-ID
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Sequence number of the last event this client saw
+      responses:
+        "200":
+          description: text/event-stream of ServerEvent frames
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
+  /v1/tasks/{id}/output:
+    get:
+      tags: [tasks]
+      summary: Paginated task output
+      parameters:
+        - $ref: "#/components/parameters/TaskID"
+        - name: offset
+          in: query
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: A page of the task's accumulated output
+
+  /v1/tasks/{id}/answer:
+    post:
+      tags: [tasks]
+      summary: Send an answer to a task paused on ask_user
+      parameters:
+        - $ref: "#/components/parameters/TaskID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [answer]
+              properties:
+                answer:
+                  type: string
+      responses:
+        "200":
+          description: Answer accepted, task resumes
+        "409":
+          description: Task has no pending question
+
+  /v1/tasks/{id}/permission:
+    post:
+      tags: [tasks]
+      summary: Approve or deny a pending tool-permission request
+      parameters:
+        - $ref: "#/components/parameters/TaskID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [allow]
+              properties:
+                allow:
+                  type: boolean
+      responses:
+        "200":
+          description: Decision accepted, task resumes
+        "409":
+          description: Task has no pending permission request
+
+  /v1/tasks/{id}/cancel:
+    post:
+      tags: [tasks]
+      summary: Cancel a running task
+      parameters:
+        - $ref: "#/components/parameters/TaskID"
+      responses:
+        "200":
+          description: Cancellation requested
+
+  /v1/settings:
+    get:
+      tags: [settings]
+      summary: Get user settings
+      responses:
+        "200":
+          description: The authenticated user's settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserSettings"
+    put:
+      tags: [settings]
+      summary: Update user settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserSettings"
+      responses:
+        "200":
+          description: Settings updated
+
+  /v1/admin/users:
+    get:
+      tags: [admin]
+      summary: List users
+      responses:
+        "200":
+          description: All users
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/User"
+    post:
+      tags: [admin]
+      summary: Create user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, role]
+              properties:
+                username:
+                  type: string
+                role:
+                  type: string
+                  enum: [admin, member]
+      responses:
+        "201":
+          description: User created — raw token returned once
+
+  /v1/admin/users/{id}:
+    patch:
+      tags: [admin]
+      summary: Update username / role
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username:
+                  type: string
+                role:
+                  type: string
+                  enum: [admin, member]
+      responses:
+        "200":
+          description: User updated
+    delete:
+      tags: [admin]
+      summary: Delete user
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+      responses:
+        "200":
+          description: User deleted
+        "403":
+          description: Self-action guard — admins cannot delete their own account
+
+  /v1/admin/users/{id}/activate:
+    post:
+      tags: [admin]
+      summary: Activate user
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+      responses:
+        "200":
+          description: User activated
+
+  /v1/admin/users/{id}/deactivate:
+    post:
+      tags: [admin]
+      summary: Deactivate user
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+      responses:
+        "200":
+          description: User deactivated
+        "403":
+          description: Self-action guard — admins cannot deactivate their own account
+
+  /v1/admin/users/{id}/token:
+    post:
+      tags: [admin]
+      summary: Regenerate API key
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+      responses:
+        "200":
+          description: New raw token returned once
+    delete:
+      tags: [admin]
+      summary: Revoke API key
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+      responses:
+        "200":
+          description: Token revoked
+        "403":
+          description: Self-action guard — admins cannot revoke their own token
+
+  /v1/admin/audit-log:
+    get:
+      tags: [admin]
+      summary: Query the admin audit trail
+      responses:
+        "200":
+          description: Audit events — actor, action, target, timestamp
+
+  /healthz:
+    get:
+      tags: [ops]
+      summary: Health check
+      security: []
+      description: LLM concurrency saturation and a task error-rate window
+      responses:
+        "200":
+          description: Server healthy
+
+  /metrics:
+    get:
+      tags: [ops]
+      summary: Prometheus metrics
+      security: []
+      description: >
+        Task duration, token usage, throughput, prompt cache hit/miss,
+        per-tool execution counts
+      responses:
+        "200":
+          description: Prometheus text exposition format
+          content:
+            text/plain:
+              schema:
+                type: string
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: "`tfa-` + 40 hex chars, issued at user creation/regeneration"
+
+  parameters:
+    TaskID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    UserID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+
+  schemas:
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+        role:
+          type: string
+          enum: [admin, member]
+        active:
+          type: boolean
+
+    UserSettings:
+      type: object
+      properties:
+        github_token:
+          type: string
+          description: Write-only; stored AES-256-GCM encrypted at rest
+        atlassian_token:
+          type: string
+          description: Write-only; stored AES-256-GCM encrypted at rest
+        atlassian_domain:
+          type: string
+        atlassian_email:
+          type: string
+
+    TaskSubmission:
+      type: object
+      required: [input, output]
+      properties:
+        input:
+          type: object
+          required: [type, text]
+          properties:
+            type:
+              type: string
+              enum: [prompt, jira]
+            text:
+              type: string
+              description: A free-text prompt, or a Jira ticket ID when type=jira
+        output:
+          type: object
+          required: [type]
+          properties:
+            type:
+              type: string
+              enum: [pr, files, print]
+            repo_url:
+              type: string
+              description: Required when type=pr
+            output_dir:
+              type: string
+              description: Required when type=files
+        github_token:
+          type: string
+          description: Optional per-request override of the saved user setting
+        atlassian_token:
+          type: string
+          description: Optional per-request override of the saved user setting
+
+    Task:
+      type: object
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          enum: [queued, running, waiting_for_input, done, failed, cancelled]
+        pending_question:
+          type: string
+        pending_kind:
+          type: string
+          enum: ["", question, permission]
+        pr_url:
+          type: string
+        output:
+          type: string
+        error_msg:
+          type: string
+        input_tokens:
+          type: integer
+        output_tokens:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
