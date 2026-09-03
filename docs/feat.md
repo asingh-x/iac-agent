@@ -25,14 +25,16 @@ whenever a feature ships — a new row here, not a mental note.
 | Agent behavior | Prompt caching | Avoids re-sending large repeated context on every LLM call |
 | Agent behavior | Multi-provider LLM | Anthropic API or AWS Bedrock — swap in config, no code change |
 | Agent behavior | Provider circuit breaker | Trips on repeated LLM provider failures instead of hammering a downed endpoint |
-| Execution & safety | Sandboxed execution | Optional Docker or Kubernetes backend runs `terraform`/`tflint`/`checkov` network-isolated, non-root, resource-limited — for untrusted multi-tenant use (see [docs/sandbox.md](sandbox.md)) |
+| Execution & safety | Sandboxed execution | Mandatory — `terraform`/`tflint`/`checkov` always run inside a Docker or Kubernetes sandbox, network-isolated, non-root, resource-limited; no host-exec fallback (see [docs/sandbox.md](sandbox.md)) |
 | Execution & safety | Path-scoped file tools | Read/Write/Edit/Glob/Grep are scoped to the task's working directory |
-| Execution & safety | Encrypted secrets | GitHub and Atlassian tokens stored AES-256-GCM encrypted at rest |
-| Reliability & scale | Multi-replica safe | Run N pods behind a plain load balancer, no sticky sessions — SSE streams and answer/permission/cancel requests work regardless of which pod a request lands on, via a NATS cross-pod relay (see [docs/architecture.md](architecture.md)) |
+| Execution & safety | Encrypted secrets | GitHub and Atlassian tokens stored AES-256-GCM encrypted at rest, with versioned keys — a key ID travels with each ciphertext so keys can be rotated (old key kept decrypt-only) without a bulk re-encryption job (see [docs/configuration.md](configuration.md)) |
+| Reliability & scale | Multi-replica safe (NATS driver) | Run N pods behind a plain load balancer, no sticky sessions — SSE streams and answer/permission/cancel requests work regardless of which pod a request lands on, via a NATS cross-pod relay (see [docs/architecture.md](architecture.md)). The `postgres` queue driver below does not yet have this cross-pod relay — durable but single-replica for the control plane |
+| Reliability & scale | Durable execution core | Postgres-backed leased task queue (`queue_driver = "postgres"`) as an alternative to NATS: atomic claim via `SELECT ... FOR UPDATE SKIP LOCKED`, fencing-token-safe Ack/Extend/Nak, exponential backoff, and dead-letter tracking — no separate queue infrastructure needed since it reuses the main Postgres database (see [docs/configuration.md](configuration.md)) |
 | Reliability & scale | Bounded LLM concurrency | Global + per-user semaphores, pause-aware (see "Concurrency-safe pauses" above) so a stalled task can't starve the pool |
 | Reliability & scale | Graceful shutdown drain | In-flight tasks finish before the process exits |
 | Reliability & scale | Stale-task reconciliation | Age-based backstop marks tasks failed if they never reach a terminal state, without falsely failing tasks legitimately paused on human input |
 | Reliability & scale | Repo-index cache | Postgres-backed cache of parsed Terraform structure, invalidated per commit SHA (see [docs/benchmarks.md](benchmarks.md)) |
+| Testing | Frontend unit tests | vitest + React Testing Library coverage for `useTaskRunner`, `TaskForm`, `OutputPanel`, `HistoryPage` — runs via `make test` alongside the Go suite |
 | Multi-tenant & admin | Multi-user | Admin/member roles, per-user API keys (`tfa-` format), token revocation |
 | Multi-tenant & admin | Audit trail | Every admin action (user create/update/delete/activate/token regen) logged with actor, action, and target — queryable at `/v1/admin/audit-log` |
 | Observability | Prometheus metrics | Task duration, token usage, throughput, prompt cache hit/miss, per-tool execution counts at `/metrics` |
