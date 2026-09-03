@@ -2,7 +2,7 @@
 
 All notable changes to iac-agent are documented here.
 
-## [Unreleased] — 2026-08-22
+## [1.0.0] — 2026-09-03
 
 **Multi-replica safety** — the server can now run as N Kubernetes pod
 replicas behind a plain load balancer, no sticky sessions. SSE streaming and
@@ -114,7 +114,7 @@ client (previously zero test infrastructure) — real coverage for
 
 See `docs/roadmap.md` for what's still open.
 
-## [0.1.0] — 2026-04-03
+## Initial — 2026-04-03
 
 Initial release — autonomous Terraform agent. Takes a prompt or Jira ticket, runs an 8-skill pipeline, and opens a validated GitHub PR with no human in the loop.
 
