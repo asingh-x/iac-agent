@@ -2,7 +2,7 @@
 
 All notable changes to iac-agent are documented here.
 
-## [Unreleased] — 2026-08-22
+## [1.0.0] — 2026-09-03
 
 **Multi-replica safety** — the server can now run as N Kubernetes pod
 replicas behind a plain load balancer, no sticky sessions. SSE streaming and
@@ -69,9 +69,52 @@ and fixed a reproduced hang (reconnecting right as a task finishes could
 leave the SSE connection stuck forever), a related per-user semaphore-sweeper
 race, and an unbounded DB write on the event-publish hot path.
 
+**Durable execution core**: a Postgres-backed leased task queue
+(`queue_driver = "postgres"`) as an alternative to NATS, for on-prem
+deployments that don't want a second piece of queue infrastructure. Atomic
+claim via `SELECT ... FOR UPDATE SKIP LOCKED`, fencing-token-safe
+Ack/Extend/Nak (a lease-expired "zombie" worker can never corrupt a row a
+reclaiming worker now owns), exponential backoff, and dead-letter tracking.
+A final whole-branch review caught two Critical bugs before merge: decrypted
+GitHub/Atlassian tokens were being retained in cleartext forever (`Ack` now
+deletes the row instead of soft-marking it done, and the dead-letter path
+strips credentials from the payload), and any Postgres error during polling
+caused an unthrottled hot-spin against an already-unhealthy database
+(`Pop` now backs off and logs instead of returning). Known, tracked, not
+fixed here: the dead-letter cap only applies via the explicit `Nak()` path,
+not a worker that crashes on every attempt without ever calling it; and a
+pre-existing, driver-agnostic bug where graceful shutdown's drain goroutine
+can be killed mid-flight by `main()` exiting before it finishes — see
+`docs/roadmap.md`'s Known issues.
+
+**Sandboxing hardening**: `ValidateSkill`/`SecurityScanSkill`'s sandbox
+executor construction is now unconditional — no more nil-executor fallback
+to a direct host `exec` call, closing the last opt-out path.
+
+**Encrypted secrets with key rotation**: ciphertexts now carry a key ID
+(`<keyID>:<ciphertext>`), so a compromised or aging encryption key can be
+rotated (moved to `TF_AGENT_ENCRYPTION_KEYS_OLD`, decrypt-only) without a
+bulk re-encryption job — existing unprefixed ciphertexts keep decrypting
+against the current key with no migration needed. A final review caught a
+Critical bug before merge: the legacy (unprefixed) decrypt path never fell
+back to old keys, so the very first rotation would have permanently orphaned
+every token not yet re-saved — fixed and re-verified. See
+`docs/configuration.md` for the rotation procedure.
+
+**Known-issue fixes**: `NATSQueue.Len()` now reports the calling queue's own
+pending count instead of the whole shared stream's total (two named queues
+no longer report an identical, inflated depth); `SecurityScanSkill` now
+returns a real error when `checkov` is missing instead of a silent
+non-error "skipping" message that read identically to a completed scan.
+
+**Frontend test coverage**: vitest + React Testing Library added to the
+client (previously zero test infrastructure) — real coverage for
+`useTaskRunner`, `TaskForm`, `OutputPanel`, and `HistoryPage`. Runs via
+`make test` alongside the Go suite.
+
 See `docs/roadmap.md` for what's still open.
 
-## [0.1.0] — 2026-04-03
+## Initial — 2026-04-03
 
 Initial release — autonomous Terraform agent. Takes a prompt or Jira ticket, runs an 8-skill pipeline, and opens a validated GitHub PR with no human in the loop.
 
